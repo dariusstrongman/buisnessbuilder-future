@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "company-brain.v1",
+  "company": {
+    "id": "co_billy_bob_lawn",
+    "legal_name": null,
+    "working_name": "Billy Bob Lawn Care",
+    "archetype": "mobile_service",
+    "jurisdiction": {"country": "US", "state": "TX", "locality": "Denton County"},
+    "owner": {"party_id": "party_billy", "control": "founder", "data_owner": true},
+    "lifecycle": "assembly",
+    "readiness": "not_ready"
+  },
+  "entities": {
+    "parties": [{"id":"party_billy","type":"person","display_name":"Billy Bob","roles":["founder","approver","account_owner"],"pii_ref":"vault://founder","permissions":["approve_irreversible","spend","sign","publish","export","delete"]}],
+    "offers": [{"id":"off_build_business","name":"Build My Business","status":"selected","price_hypothesis":{"setup_usd":2495,"recurring_usd":0}}],
+    "decisions": [{"id":"dec_001","type":"market_recommendation","question":"Launch a route-dense recurring lawn-maintenance offer first?","recommendation":"approve","founder_choice":"approved","rationale":"Simpler capacity model and repeatable service; pricing and demand remain hypotheses.","decided_by":"party_billy","decided_at":"2026-09-12T17:00:00Z"}],
+    "services": [{"id":"svc_mow","name":"Recurring mow, edge, blow","status":"proposed","price":{"amount":49,"currency":"USD","basis":"starting visit","confidence":0.45},"duration_minutes":{"min":35,"max":55},"requirements":["equipment_core","service_address","weather_policy"]}],
+    "markets": [{"id":"market_north_denton","service_radius_miles":12,"center":"North Denton County, TX","target_segments":["owner-occupied residential"],"excluded":["chemical application","irrigation repair","tree work"],"confidence":0.55}],
+    "capacity_models": [{"id":"cap_001","unit":"crew-hour","founder_hours_per_week":24,"travel_buffer_pct":25,"weather_buffer_pct":15,"safe_weekly_jobs_hypothesis":18,"status":"needs_field_validation"}],
+    "assets": [{"id":"asset_mower","type":"equipment","name":"21-inch mower","ownership":"founder","status":"declared","evidence":null},{"id":"asset_logo","type":"brand","name":"Primary wordmark","ownership":"founder","status":"executed","evidence":"ev_logo_preview"}],
+    "accounts": [{"id":"acct_domain","type":"domain_registrar","owner":"party_billy","custody":"founder","status":"founder_action_required","secret_ref":null},{"id":"acct_email","type":"workspace_email","owner":"party_billy","custody":"founder","status":"proposed","secret_ref":null}],
+    "workflows": [{"id":"wf_lead_to_quote","trigger":"website_request","steps":["capture","validate_radius","request_photos","draft_quote","founder_approve","send"],"authority":{"auto":["capture","validate_radius","request_photos","draft_quote"],"founder_only":["approve_price_exception","send_over_cap"]},"status":"tested","verification_id":"ver_wf_001"}],
+    "agents": [{"id":"agent_inbox","role":"Customer Inbox Assistant","objective":"Triage and draft routine customer communication","permissions":["read_inbox","draft_reply"],"denied":["send_without_policy","refund","contract","change_price","legal_advice"],"budget":{"monthly_usd":20},"status":"proposed"}],
+    "tasks": [{"id":"task_domain","title":"Buy selected domain in Billy Bob’s account","executor":"founder","irreversible":true,"status":"blocked_founder","depends_on":["dec_name"],"verification_id":"ver_domain_001"}],
+    "verifications": [{"id":"ver_wf_001","target_id":"wf_lead_to_quote","state":"tested","method":"automated_plus_human","evidence":["ev_test_lead_valid","ev_test_lead_outside_radius"],"expires_at":"2026-12-11T17:00:00Z","retest_on":["workflow_change","pricing_policy_change"]},{"id":"ver_domain_001","target_id":"acct_domain","state":"proposed","method":"external_plus_founder","evidence":[],"retest_on":["dns_change","registrar_change"]}],
+    "evidence": [{"id":"ev_logo_preview","kind":"render","uri":"artifact://brand/logo-v1.svg","hash":"sha256:example","created_by":"builder","created_at":"2026-09-12T17:03:00Z"},{"id":"ev_test_lead_valid","kind":"test_run","result":"pass","input_fixture":"in-radius lead","output_hash":"sha256:example2"},{"id":"ev_test_lead_outside_radius","kind":"test_run","result":"pass","input_fixture":"out-of-radius lead","output_hash":"sha256:example3"}],
+    "audit_events": [{"id":"audit_001","actor":"party_billy","action":"approve","target":"dec_001","before":"pending","after":"approved","at":"2026-09-12T17:00:00Z","reason":"Founder selected recurring maintenance wedge"}]
+  },
+  "field_contract": {
+    "common": ["id","type","status","created_at","updated_at","owner_party_id","provenance[]","confidence","permissions","version"],
+    "provenance_item": ["source_type","source_ref","captured_at","actor","quote_or_hash","license_or_terms"],
+    "verification_states": ["proposed","executed","tested","verified"],
+    "lifecycle_states": ["draft","assembly","ready","fully_set","operating","paused","archived"],
+    "confidence_scale": "0.0–1.0; never substitutes for verification",
+    "immutability": "audit_events and evidence hashes are append-only; corrections create superseding records"
+  }
+}
