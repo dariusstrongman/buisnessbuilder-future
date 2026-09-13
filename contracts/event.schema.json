@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://contracts.businessbuilder.local/v1/event.schema.json","title":"Event v1","type":"object","additionalProperties":false,
+  "required":["schema_version","event_id","company_id","event_type","occurred_at","recorded_at","producer","sequence","correlation_id","causation_id","payload","payload_digest"],
+  "properties":{"schema_version":{"const":"event.v1"},"event_id":{"$ref":"common.schema.json#/$defs/id"},"company_id":{"$ref":"common.schema.json#/$defs/id"},"event_type":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{2,127}$"},"occurred_at":{"$ref":"common.schema.json#/$defs/timestamp"},"recorded_at":{"$ref":"common.schema.json#/$defs/timestamp"},"producer":{"type":"string","minLength":1,"maxLength":100},"sequence":{"type":"integer","minimum":1},"correlation_id":{"$ref":"common.schema.json#/$defs/id"},"causation_id":{"type":["string","null"],"maxLength":128},"subject_ref":{"$ref":"common.schema.json#/$defs/ref"},"payload":{"type":"object"},"payload_digest":{"$ref":"common.schema.json#/$defs/digest"},"visibility":{"enum":["customer","internal","restricted"]}}
+}
