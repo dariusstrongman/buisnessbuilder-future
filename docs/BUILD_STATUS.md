@@ -10,7 +10,7 @@ GitHub refs and repository contents are execution truth. This is a bounded coord
 |---|---|---|
 | `dariusstrongman/Stromation` | `main` → `fbceb14bfcb8301750bb071fc1d2b811e732d944`. Phase 1F PRs #120-#123 are merged. Draft PRs #40 and #41 remain open. | Claude retains website-engine ownership. Do not touch the engine or build the real adapter until Claude explicitly declares it ready. |
 | `dariusstrongman/website-builder` | `main` → `c2eafeda43f89416fb135248151422de2799be04`. Draft PR #1 (`feat/redesign-intake` → `5187b36...`) remains open and unmerged. | Preserve as the transitional standalone surface; it is not the real generation engine. |
-| `dariusstrongman/buisnessbuilder-future` | `main` → `b5a44761ce83f0032684f825829123380573536f`. `integration/offline-billy-bob-v1` → `d1dfb04f1c627c1ea0271459e5c178f8dd990077`. | Main remains Company Brain only. The broader offline system is durable on the separate integration branch and must not be merged without the remaining review gates. |
+| `dariusstrongman/buisnessbuilder-future` | `main` → `b5a44761ce83f0032684f825829123380573536f`. Integration code checkpoint: `d1dfb04f1c627c1ea0271459e5c178f8dd990077`; later branch commits are status-document updates only, so resolve the live ref. | Main remains Company Brain only. The broader offline system is durable on the separate integration branch and must not be merged without the remaining review gates. |
 
 ## Integration durability
 
