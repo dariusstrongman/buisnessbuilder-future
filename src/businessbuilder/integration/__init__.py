@@ -7,11 +7,14 @@ from .adapters import (
     VerificationInvalidationAdapter,
 )
 from .contracts import tenant_v2_projection
+from .commercial import RuntimeCommercialEventSink, RuntimeEntitlementGuard
 
 __all__ = [
     "CompanyBrainRuntimeAdapter",
     "CompanyBrainVerificationAdapter",
     "RuntimeVerificationAdapter",
+    "RuntimeCommercialEventSink",
+    "RuntimeEntitlementGuard",
     "VerificationInvalidationAdapter",
     "tenant_v2_projection",
 ]
