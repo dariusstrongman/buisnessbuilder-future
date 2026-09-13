@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v2/job.schema.json",
+  "title": "Job v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "job_id",
+    "company_id",
+    "capability_id",
+    "objective",
+    "status",
+    "idempotency_key",
+    "input_artifact_refs",
+    "required_approval_refs",
+    "budget_ref",
+    "created_at",
+    "updated_at",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "job.v2"
+    },
+    "job_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "company_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "capability_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 2000
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "blocked",
+        "queued",
+        "accepted",
+        "running",
+        "waiting_approval",
+        "waiting_founder",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 200
+    },
+    "input_artifact_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "output_artifact_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "required_approval_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "budget_ref": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "provider_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 500
+    },
+    "failure": {
+      "$ref": "common.schema.json#/$defs/error"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    }
+  }
+}

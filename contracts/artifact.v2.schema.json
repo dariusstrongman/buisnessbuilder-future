@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v2/artifact.schema.json",
+  "title": "Artifact v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "artifact_id",
+    "company_id",
+    "kind",
+    "title",
+    "media_type",
+    "content_digest",
+    "owner_ref",
+    "custody",
+    "provenance",
+    "created_at",
+    "immutable"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "artifact.v2"
+    },
+    "artifact_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "company_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "kind": {
+      "enum": [
+        "brief",
+        "research",
+        "brand",
+        "website_preview",
+        "website_package",
+        "media",
+        "policy",
+        "receipt",
+        "test_result",
+        "export",
+        "other"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 250
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 100
+    },
+    "content_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "owner_ref": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "custody": {
+      "enum": [
+        "customer",
+        "platform",
+        "provider",
+        "external"
+      ]
+    },
+    "locator": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/permission"
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/provenance"
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "immutable": {
+      "const": true
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    }
+  }
+}
