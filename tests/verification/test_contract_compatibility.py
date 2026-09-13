@@ -5,7 +5,7 @@ import re
 import unittest
 from pathlib import Path
 
-from verification.fixtures import proposed_record
+from businessbuilder.verification.fixtures import proposed_record
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +84,7 @@ class ContractCompatibilityTests(unittest.TestCase):
         validate_subset(contract, schema, schema, common)
 
     def test_registry_contains_all_required_initial_definitions(self) -> None:
-        from verification.catalog import default_registry
+        from businessbuilder.verification.catalog import default_registry
 
         required = {
             "website.deployed", "website.https", "website.forms", "website.mobile", "website.links",

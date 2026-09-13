@@ -4,7 +4,7 @@ Status: offline/dev-safe subsystem. It performs no external calls and trusts no 
 
 ## Boundary
 
-`verification/` owns cross-capability evidence evaluation, verification state, dependency invalidation, blockers, and the Ready/Fully Set projection. It does not own Company Brain storage, event/job orchestration, website QA internals, provider integrations, or external authority decisions.
+`src/businessbuilder/verification/` owns cross-capability evidence evaluation, verification state, dependency invalidation, blockers, and the Ready/Fully Set projection. It does not own Company Brain storage, event/job orchestration, website QA internals, provider integrations, or external authority decisions.
 
 Public entry points:
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from verification.catalog import default_registry
-from verification.fixtures import (
+from businessbuilder.verification.catalog import default_registry
+from businessbuilder.verification.fixtures import (
     COMPANY_ID,
     FIXTURE_NOW,
     TENANT_ID,
@@ -12,11 +12,11 @@ from verification.fixtures import (
     populate_fully_set,
     populate_ready,
 )
-from verification.models import Blocker, BlockerSeverity, FounderActionStatus
-from verification.ports import FounderActionSnapshot
-from verification.readiness import ReadinessEvaluator, billy_bob_policy
-from verification.repository import InMemoryVerificationRepository
-from verification.service import VerificationService
+from businessbuilder.verification.models import Blocker, BlockerSeverity, FounderActionStatus
+from businessbuilder.verification.ports import FounderActionSnapshot
+from businessbuilder.verification.readiness import ReadinessEvaluator, billy_bob_policy
+from businessbuilder.verification.repository import InMemoryVerificationRepository
+from businessbuilder.verification.service import VerificationService
 
 
 def blocker(severity: BlockerSeverity, blocker_id: str = "blocker_fixture") -> Blocker:

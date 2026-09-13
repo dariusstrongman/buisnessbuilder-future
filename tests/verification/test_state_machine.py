@@ -5,11 +5,11 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from verification.catalog import default_registry
-from verification.fixtures import COMPANY_ID, FIXTURE_NOW, TENANT_ID, evidence, proposed_record
-from verification.models import DependencyRef, EvidenceType, VerificationMethod, VerificationState
-from verification.repository import InMemoryVerificationRepository, JsonVerificationRepository
-from verification.service import IllegalTransitionError, MissingEvidenceError, VerificationError, VerificationService
+from businessbuilder.verification.catalog import default_registry
+from businessbuilder.verification.fixtures import COMPANY_ID, FIXTURE_NOW, TENANT_ID, evidence, proposed_record
+from businessbuilder.verification.models import DependencyRef, EvidenceType, VerificationMethod, VerificationState
+from businessbuilder.verification.repository import InMemoryVerificationRepository, JsonVerificationRepository
+from businessbuilder.verification.service import IllegalTransitionError, MissingEvidenceError, VerificationError, VerificationService
 
 
 class VerificationStateMachineTests(unittest.TestCase):

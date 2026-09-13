@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from verification.catalog import default_registry
-from verification.events import CanonicalEvent, VerificationEventHandler
-from verification.fixtures import COMPANY_ID, FIXTURE_NOW, TENANT_ID, evidence, verify_definition
-from verification.models import DependencyRef, EvidenceType, ExternalRecord, ExternalState, VerificationState
-from verification.repository import InMemoryVerificationRepository
-from verification.service import VerificationService
+from businessbuilder.verification.catalog import default_registry
+from businessbuilder.verification.events import CanonicalEvent, VerificationEventHandler
+from businessbuilder.verification.fixtures import COMPANY_ID, FIXTURE_NOW, TENANT_ID, evidence, verify_definition
+from businessbuilder.verification.models import DependencyRef, EvidenceType, ExternalRecord, ExternalState, VerificationState
+from businessbuilder.verification.repository import InMemoryVerificationRepository
+from businessbuilder.verification.service import VerificationService
 
 
 class ExternalAndEventTests(unittest.TestCase):
