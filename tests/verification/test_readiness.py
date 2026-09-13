@@ -29,7 +29,7 @@ def blocker(severity: BlockerSeverity, blocker_id: str = "blocker_fixture") -> B
         affected_target="launch",
         reason="fixture reason",
         remediation="fixture remediation",
-        owner="party_billy_bob",
+        owner="party_billy",
     )
 
 

@@ -17,8 +17,8 @@ from .service import VerificationService
 
 
 FIXTURE_NOW = datetime(2026, 9, 13, 18, 0, tzinfo=timezone.utc)
-TENANT_ID = "tenant_billy_demo"
-COMPANY_ID = "company_billy_bob_lawn"
+TENANT_ID = "tenant_billy"
+COMPANY_ID = "co_billy_bob_lawn"
 
 
 def billy_snapshot(
@@ -35,7 +35,7 @@ def billy_snapshot(
         version=3,
         approved_offer_ids=("offer_mow_edge_blow",) if offer else (),
         approved_service_area_ids=("market_denton_12_mile",) if service_area else (),
-        owner_ids=("party_billy_bob",),
+        owner_ids=("party_billy",),
         founder_actions=(
             FounderActionSnapshot("founder_action_domain", FounderActionStatus.VERIFIED, critical=True),
             FounderActionSnapshot("founder_action_admin", status, critical=False),
@@ -52,7 +52,7 @@ def proposed_record(
     *,
     company_id: str = COMPANY_ID,
     tenant_id: str = TENANT_ID,
-    owner: str | None = "party_billy_bob",
+    owner: str | None = "party_billy",
     method: VerificationMethod = VerificationMethod.AUTOMATED,
     dependencies: tuple[DependencyRef, ...] = (),
 ) -> VerificationRecord:

@@ -5,18 +5,18 @@ from pathlib import Path
 import sqlite3
 import unittest
 
-from businessbuilder_runtime.approvals import ApprovalService
-from businessbuilder_runtime.audit import to_audit_contract
-from businessbuilder_runtime.capabilities import CapabilityRegistry
-from businessbuilder_runtime.contracts import ContractValidator
-from businessbuilder_runtime.fakes import (
+from businessbuilder.runtime.approvals import ApprovalService
+from businessbuilder.runtime.audit import to_audit_contract
+from businessbuilder.runtime.capabilities import CapabilityRegistry
+from businessbuilder.runtime.contracts import ContractValidator
+from businessbuilder.runtime.fakes import (
     FakeCapability,
     FakeCrmCapability,
     FakeEmailCapability,
     FakeWebsiteCapability,
 )
-from businessbuilder_runtime.ids import DeterministicIds
-from businessbuilder_runtime.models import (
+from businessbuilder.runtime.ids import DeterministicIds
+from businessbuilder.runtime.models import (
     ApprovalMode,
     Budget,
     CapabilityRequest,
@@ -26,9 +26,9 @@ from businessbuilder_runtime.models import (
     Money,
     RetryPolicy,
 )
-from businessbuilder_runtime.orchestrator import IllegalTransition, JobOrchestrator
-from businessbuilder_runtime.ports import FakeCompanyStateReader, RecordingVerificationPort
-from businessbuilder_runtime.storage import SQLiteRuntimeRepository
+from businessbuilder.runtime.orchestrator import IllegalTransition, JobOrchestrator
+from businessbuilder.runtime.ports import FakeCompanyStateReader, RecordingVerificationPort
+from businessbuilder.runtime.storage import SQLiteRuntimeRepository
 from fixtures.runtime.billy_bob import FIXED_NOW, run_billy_bob, website_request
 
 

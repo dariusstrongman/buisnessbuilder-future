@@ -40,6 +40,13 @@ class VerificationService:
         self._check_evidence_scope(record)
         return self.repository.save(record)
 
+    def get(self, tenant_id: str, company_id: str, verification_id: str) -> VerificationRecord:
+        """Read through the service boundary without exposing repository internals."""
+        return self.repository.get(tenant_id, company_id, verification_id)
+
+    def list_for_company(self, tenant_id: str, company_id: str) -> tuple[VerificationRecord, ...]:
+        return self.repository.list_for_company(tenant_id, company_id)
+
     def transition(
         self,
         tenant_id: str,

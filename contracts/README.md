@@ -2,6 +2,8 @@
 
 These Draft 2020-12 JSON Schemas are the repository-neutral language of the business builder. They define the seam; they do not implement production behavior.
 
+Tenant-scoped nervous-system boundaries also have additive `*.v2.schema.json` schemas. v1 remains supported; v2 requires `tenant_id`. See `docs/CONTRACT_VERSIONING.md`.
+
 | Contract | File | Purpose |
 |---|---|---|
 | Common | `common.schema.json` | IDs, timestamps, provenance, money and typed references |
@@ -26,4 +28,3 @@ Rules:
 - Additive optional fields may remain within v1. Breaking semantic changes require v2.
 - Examples and fixtures must use fictional Billy Bob data only.
 - Provider-specific state stays under opaque references, not canonical enums.
-

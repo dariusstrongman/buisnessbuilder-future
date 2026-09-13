@@ -40,7 +40,8 @@ class ContractCompatibilityTest(unittest.TestCase):
                     "verification.schema.json","approval.schema.json","artifact.schema.json","budget-spend.schema.json",
                     "founder-action.schema.json","audit-event.schema.json","website-capability.schema.json","common.schema.json"}
         found = {path.name for path in (ROOT / "contracts").glob("*.json")}
-        self.assertEqual(expected, found)
+        # Additive contract versions are allowed; every released v1 file must remain.
+        self.assertTrue(expected.issubset(found))
         for name in found:
             self.assertEqual(json.loads((ROOT / "contracts" / name).read_text())["$schema"], "https://json-schema.org/draft/2020-12/schema")
 
