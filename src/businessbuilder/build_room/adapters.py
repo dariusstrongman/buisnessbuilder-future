@@ -9,6 +9,8 @@ from businessbuilder.integration.contracts import tenant_v2_projection
 from .projection import ProjectionError, ScopedEnvelope
 
 
+JOB_STATES = frozenset({"proposed", "blocked", "queued", "accepted", "running", "waiting_approval", "waiting_founder", "succeeded", "failed", "cancelled"})
+EVENT_VISIBILITIES = frozenset({"customer", "internal", "restricted"})
 APPROVAL_STATES = frozenset({"requested", "granted", "denied", "revoked", "expired", "superseded"})
 FOUNDER_ACTION_STATES = frozenset({"required", "in_progress", "submitted", "verified", "declined", "expired", "waived_noncritical"})
 VERIFICATION_STATES = frozenset({"proposed", "executed", "tested", "verified", "failed", "expired"})
@@ -104,6 +106,8 @@ def adapt_job(
 ) -> dict[str, Any]:
     value = _mapping(record, "job.v2")
     _required(value, ("job_id", "company_id", "tenant_id", "objective", "status", "budget_ref", "version"), "job")
+    if not isinstance(value["status"], str) or value["status"] not in JOB_STATES:
+        raise ProjectionError("job status is invalid")
     tenant_id, company_id = _scope(value, "job")
     return {
         "tenant_id": tenant_id, "company_id": company_id, "id": value["job_id"], "kind": "job",
@@ -174,10 +178,13 @@ def adapt_event(record: Any) -> dict[str, Any]:
     payload = value["payload"]
     if not isinstance(payload, Mapping):
         raise ProjectionError("event payload must be an object")
+    visibility = value.get("visibility", "internal")
+    if not isinstance(visibility, str) or visibility not in EVENT_VISIBILITIES:
+        raise ProjectionError("event visibility is invalid")
     return {
         "tenant_id": tenant_id, "company_id": company_id, "event_id": value["event_id"],
         "event_type": value["event_type"], "occurred_at": _iso(value["occurred_at"], "event occurred_at"),
-        "sequence": _minor(value["sequence"], "event sequence"), "visibility": value.get("visibility", "internal"),
+        "sequence": _minor(value["sequence"], "event sequence"), "visibility": visibility,
         "label": str(payload.get("customer_label", value["event_type"].replace(".", " ").title())),
         "detail": str(payload.get("customer_detail", "")),
     }
