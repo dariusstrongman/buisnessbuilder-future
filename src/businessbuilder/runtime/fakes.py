@@ -1,9 +1,66 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from hashlib import sha256
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .ports import VerifiedApprovalActor
+
+
+@dataclass(frozen=True, slots=True)
+class FakeApprovalPrincipal:
+    """Opaque principal used only by deterministic offline fixtures."""
+
+    principal_id: str
+
+
+class FakeApprovalPrincipalAuthority:
+    def __init__(self) -> None:
+        self._principals: dict[
+            str, tuple[FakeApprovalPrincipal, str, str, VerifiedApprovalActor]
+        ] = {}
+
+    def issue(
+        self,
+        *,
+        principal_id: str,
+        tenant_id: str,
+        company_id: str,
+        actor_id: str,
+        actor_role: str,
+    ) -> FakeApprovalPrincipal:
+        principal = FakeApprovalPrincipal(principal_id)
+        self._principals[principal_id] = (
+            principal,
+            tenant_id,
+            company_id,
+            VerifiedApprovalActor(actor_id, actor_role),
+        )
+        return principal
+
+    def verify_approval(
+        self,
+        principal: object,
+        *,
+        tenant_id: str,
+        company_id: str,
+        required_role: str,
+        at,
+    ) -> VerifiedApprovalActor:
+        if not isinstance(principal, FakeApprovalPrincipal):
+            raise PermissionError("trusted authenticated principal required")
+        registered = self._principals.get(principal.principal_id)
+        if registered is None or registered[0] is not principal:
+            raise PermissionError("untrusted principal")
+        _, expected_tenant, expected_company, actor = registered
+        if (tenant_id, company_id) != (expected_tenant, expected_company):
+            raise PermissionError("principal request scope mismatch")
+        if actor.actor_role != required_role:
+            raise PermissionError(f"approval requires role {required_role}")
+        return actor
 
 from .capabilities import Capability
 from .contracts import ContractValidator

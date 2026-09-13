@@ -7,10 +7,12 @@ from .adapters import (
     VerificationInvalidationAdapter,
 )
 from .contracts import tenant_v2_projection
+from .runtime_authorization import IdentityApprovalPrincipalVerifier
 
 __all__ = [
     "CompanyBrainRuntimeAdapter",
     "CompanyBrainVerificationAdapter",
+    "IdentityApprovalPrincipalVerifier",
     "RuntimeVerificationAdapter",
     "VerificationInvalidationAdapter",
     "tenant_v2_projection",

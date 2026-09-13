@@ -1,6 +1,33 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedApprovalActor:
+    actor_id: str
+    actor_role: str
+
+
+class ApprovalPrincipalVerifier(Protocol):
+    """Trust boundary for server-created authentication context."""
+
+    def verify_approval(
+        self,
+        principal: object,
+        *,
+        tenant_id: str,
+        company_id: str,
+        required_role: str,
+        at: datetime,
+    ) -> VerifiedApprovalActor: ...
+
+
+class DenyAllApprovalPrincipalVerifier:
+    def verify_approval(self, principal: object, **scope: Any) -> VerifiedApprovalActor:
+        raise PermissionError("trusted authenticated principal required")
 
 
 class CompanyStateReader(Protocol):

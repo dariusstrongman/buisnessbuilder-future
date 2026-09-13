@@ -22,7 +22,7 @@ from businessbuilder.integration.adapters import (
     VerificationInvalidationAdapter,
 )
 from businessbuilder.runtime.capabilities import CapabilityRegistry
-from businessbuilder.runtime.fakes import FakeWebsiteCapability
+from businessbuilder.runtime.fakes import FakeApprovalPrincipalAuthority, FakeWebsiteCapability
 from businessbuilder.runtime.ids import DeterministicIds
 from businessbuilder.runtime.models import ApprovalMode, Budget, Event, JobStatus, Money
 from businessbuilder.runtime.orchestrator import JobOrchestrator
@@ -178,6 +178,14 @@ def run_billy_bob() -> dict[str, Any]:
     runtime_repository = SQLiteRuntimeRepository()
     ids = DeterministicIds()
     capability_registry = CapabilityRegistry()
+    approval_principals = FakeApprovalPrincipalAuthority()
+    founder_principal = approval_principals.issue(
+        principal_id="principal_billy_bob",
+        tenant_id=TENANT_ID,
+        company_id=COMPANY_ID,
+        actor_id=founder.id,
+        actor_role="founder",
+    )
     website = FakeWebsiteCapability(root / "contracts")
     capability_registry.register(website)
     runtime = JobOrchestrator(
@@ -187,6 +195,7 @@ def run_billy_bob() -> dict[str, Any]:
         verification=verification_port,
         id_factory=ids,
         clock=lambda: FIXED_NOW,
+        approval_principals=approval_principals,
     )
     runtime.events.publish(
         Event(
@@ -224,8 +233,7 @@ def run_billy_bob() -> dict[str, Any]:
         company_id=COMPANY_ID,
         job_id=JOB_ID,
         approval_id=job.approval_ids[0],
-        actor_id=founder.id,
-        actor_role="founder",
+        principal=founder_principal,
     )
     brain.append_approval(
         scope,

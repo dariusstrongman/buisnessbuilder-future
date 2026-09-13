@@ -28,6 +28,8 @@ class AuditLog:
         before: Any = None,
         after: Any = None,
         approval_id: str | None = None,
+        permission: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
         value = {
             "schema_version": "audit-event.v1",
@@ -48,10 +50,18 @@ class AuditLog:
             "evidence_refs": [],
             "append_only": True,
         }
+        if permission is not None:
+            value["permission"] = permission
+        if source is not None:
+            value["source"] = source
         self.repository.append_audit(value)
         return value
 
 
 def to_audit_contract(record: dict[str, Any]) -> dict[str, Any]:
     """Remove runtime-only tenant scope for released AuditEvent v1 validation."""
-    return {key: value for key, value in record.items() if key != "tenant_id"}
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in {"tenant_id", "permission", "source"}
+    }

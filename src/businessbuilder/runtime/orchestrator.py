@@ -24,7 +24,12 @@ from .models import (
     RetryPolicy,
     utc_now,
 )
-from .ports import CompanyStateReader, VerificationPort
+from .ports import (
+    ApprovalPrincipalVerifier,
+    CompanyStateReader,
+    DenyAllApprovalPrincipalVerifier,
+    VerificationPort,
+)
 from .storage import RuntimeRepository
 
 
@@ -65,6 +70,7 @@ class JobOrchestrator:
         verification: VerificationPort,
         id_factory: Callable[[str], str] = random_id,
         clock: Callable[[], datetime] = utc_now,
+        approval_principals: ApprovalPrincipalVerifier | None = None,
     ) -> None:
         self.repository = repository
         self.registry = registry
@@ -74,7 +80,12 @@ class JobOrchestrator:
         self.clock = clock
         self.audit = AuditLog(repository, id_factory, clock)
         self.events = LocalEventBus(repository, self.audit)
-        self.approvals = ApprovalService(repository, self.audit, clock)
+        self.approvals = ApprovalService(
+            repository,
+            self.audit,
+            clock,
+            approval_principals or DenyAllApprovalPrincipalVerifier(),
+        )
         self.budgets = BudgetService(repository, self.audit)
 
     def create_job(
@@ -307,8 +318,9 @@ class JobOrchestrator:
         company_id: str,
         job_id: str,
         approval_id: str,
-        actor_id: str,
-        actor_role: str,
+        principal: object | None = None,
+        actor_id: str | None = None,
+        actor_role: str | None = None,
     ) -> Job:
         job = self._job(tenant_id, company_id, job_id)
         self.approvals.decide(
@@ -316,12 +328,17 @@ class JobOrchestrator:
             company_id=company_id,
             approval_id=approval_id,
             decision=ApprovalState.GRANTED,
-            actor_id=actor_id,
-            actor_role=actor_role,
+            principal=principal,
             correlation_id=job.correlation_id,
         )
-        event_type = "founder.approved" if actor_role == "founder" else "approval.granted"
-        self._emit(job, event_type, {"approval_id": approval_id, "actor_role": actor_role})
+        approval = self.repository.get_approval(tenant_id, company_id, approval_id)
+        assert approval is not None
+        event_type = "founder.approved" if approval.decided_by_role == "founder" else "approval.granted"
+        self._emit(
+            job,
+            event_type,
+            {"approval_id": approval_id, "actor_role": approval.decided_by_role},
+        )
         return self.refresh(job)
 
     def cancel(self, tenant_id: str, company_id: str, job_id: str, actor_id: str = "runtime_operator") -> Job:

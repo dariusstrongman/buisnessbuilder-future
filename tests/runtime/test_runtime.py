@@ -10,6 +10,7 @@ from businessbuilder.runtime.audit import to_audit_contract
 from businessbuilder.runtime.capabilities import CapabilityRegistry
 from businessbuilder.runtime.contracts import ContractValidator
 from businessbuilder.runtime.fakes import (
+    FakeApprovalPrincipalAuthority,
     FakeCapability,
     FakeCrmCapability,
     FakeEmailCapability,
@@ -45,6 +46,21 @@ class RuntimeTestCase(unittest.TestCase):
         self.crm = FakeCrmCapability()
         self.email = FakeEmailCapability()
         self.website = FakeWebsiteCapability(ROOT / "contracts")
+        self.principals = FakeApprovalPrincipalAuthority()
+        self.authorized_principal = self.principals.issue(
+            principal_id="principal_authorized_human",
+            tenant_id="tenant_one",
+            company_id="company_one",
+            actor_id="human_operator",
+            actor_role="authorized_human",
+        )
+        self.founder_principal = self.principals.issue(
+            principal_id="principal_founder",
+            tenant_id="tenant_one",
+            company_id="company_one",
+            actor_id="founder_one",
+            actor_role="founder",
+        )
         for capability in (self.crm, self.email, self.website):
             self.registry.register(capability)
         self.runtime = JobOrchestrator(
@@ -54,6 +70,7 @@ class RuntimeTestCase(unittest.TestCase):
             verification=self.verification,
             id_factory=self.ids,
             clock=lambda: FIXED_NOW,
+            approval_principals=self.principals,
         )
         self.runtime.budgets.create(
             Budget("budget_company_one", "tenant_one", "company_one", Money("USD", 1000)),
@@ -143,7 +160,7 @@ class ApprovalPermissionTests(RuntimeTestCase):
         self.assertEqual(FailureKind.APPROVAL_BLOCKED, blocked.failure.kind)
         job = self.runtime.approve_job(
             tenant_id=job.tenant_id, company_id=job.company_id, job_id=job.job_id,
-            approval_id=job.approval_ids[0], actor_id="human_operator", actor_role="authorized_human",
+            approval_id=job.approval_ids[0], principal=self.authorized_principal,
         )
         self.assertEqual(JobStatus.RUNNABLE, job.status)
         self.assertEqual(JobStatus.SUCCEEDED, self.runtime.run(job.tenant_id, job.company_id, job.job_id).status)
@@ -164,7 +181,7 @@ class ApprovalPermissionTests(RuntimeTestCase):
         self.repo.save_approval(approval)
         job = self.runtime.approve_job(
             tenant_id=job.tenant_id, company_id=job.company_id, job_id=job.job_id,
-            approval_id=job.approval_ids[0], actor_id="founder_one", actor_role="founder",
+            approval_id=job.approval_ids[0], principal=self.founder_principal,
         )
         self.assertEqual(JobStatus.WAITING_APPROVAL, job.status)
 
