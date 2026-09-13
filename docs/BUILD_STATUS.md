@@ -1,85 +1,83 @@
 # Business Builder Build Status
 
-Last verified: 2026-09-13T03:06:30Z
+Last verified: 2026-09-13T03:20:00Z
 
-GitHub refs, commits, checks, and repository contents are execution truth. This file is the durable coordination summary and must be corrected whenever GitHub disagrees.
+GitHub refs and repository contents are execution truth. This is a bounded coordination snapshot, not authorization to start work or deploy.
 
-## Program posture
+## GitHub truth
 
-- Current checkpoint: **offline spine, Setup/Admin, AI Workforce policy, and Build Room are independently reviewed and integrated on the offline branch; combined CI is green**.
-- Production posture: **no production integration or infrastructure work is authorized**.
-- Real Website Capability: **held** until Claude explicitly declares the Stromation website engine ready for integration.
-- Current external capability: `fake.website.build` is intentionally the only fake external capability in the integrated offline journey.
-- Ownership: Company Brain is canonical product state. Stromation owns Sol and website-engine internals. `website-builder` remains a transitional standalone surface.
+| Repository | Current GitHub state | Decision |
+|---|---|---|
+| `dariusstrongman/Stromation` | `main` → `fbceb14bfcb8301750bb071fc1d2b811e732d944`. Phase 1F PRs #120-#123 are merged. Draft PRs #40 and #41 remain open. | Claude retains website-engine ownership. Do not touch the engine or build the real adapter until Claude explicitly declares it ready. |
+| `dariusstrongman/website-builder` | `main` → `c2eafeda43f89416fb135248151422de2799be04`. Draft PR #1 (`feat/redesign-intake` → `5187b36...`) remains open and unmerged. | Preserve as the transitional standalone surface; it is not the real generation engine. |
+| `dariusstrongman/buisnessbuilder-future` | `main` → `b5a44761ce83f0032684f825829123380573536f`. `integration/offline-billy-bob-v1` → `d1dfb04f1c627c1ea0271459e5c178f8dd990077`. | Main remains Company Brain only. The broader offline system is durable on the separate integration branch and must not be merged without the remaining review gates. |
 
-## Canonical repository state
+## Integration durability
 
-| Repository | Default branch / head | Active branch / head | Responsibility | Coordination decision |
-|---|---|---|---|---|
-| `dariusstrongman/Stromation` | `main` / `cc10d9ea29bea02d194e2154af276225274b9570` | Claude Phase 1F; PR #121 `e699491c...`, #122 `d8a9fa5f...`, #123 `cc708b00...` | Sol runtime and premium website engine | PR #120 merged with green CI. Hold real adapter: remaining stacked changes and fresh premium-output proof are outstanding. |
-| `dariusstrongman/website-builder` | `main` / `c2eafeda43f89416fb135248151422de2799be04` | Draft PR #1 `feat/redesign-intake` / `5187b36ade62219cbe40e08005bd3a6655fa4b5c` | Transitional standalone customer/marketing surface | Preserve; do not make it the unified platform or generation engine. |
-| `dariusstrongman/buisnessbuilder-future` | `main` / `b5a44761ce83f0032684f825829123380573536f` | `integration/offline-billy-bob-v1`; accepted combined code checkpoint `1f5e25f9048c400d50faada3327cb19bc53c8f6a`, followed only by status commits | Unified Business Builder platform | Combined offline product branch is green; main is intentionally unchanged. Resolve the live branch ref in GitHub rather than treating this self-referential status file as its own head. |
+The literal Worker 4 SHA `2c8549c6579409d6b114bfb2a8436d4ec23ecfca` is **not addressable as a normal remote GitHub commit**.
 
-## Integration preservation record
+Its work is nevertheless durably preserved in both forms:
 
-Worker 4's original local integration commit was:
+- Equivalent published commit: `fbaee89ae3cd504602f69e5a04d4720248fc515f`
+- Published branch lineage: `integration/offline-billy-bob-v1`
+- Exact-history archive branch: `archive/offline-billy-bob-v1-original-bundle` → `1223aeb10c4b46be1664608a1fdc11d0c4c12dab`
+- Bundle file: `archive/offline-billy-bob-v1-original.bundle.b64` (Git blob `fcea17de4d9f1c4b2b24ae938c743fe25445094e`)
+- Recovery instructions: `archive/README.md`
+- Required base: `b5a44761ce83f0032684f825829123380573536f`
 
-- commit: `2c8549c6579409d6b114bfb2a8436d4ec23ecfca`
-- tree: `11b57ddc0e768cfbc7e1cdb7a7cd750383754c80`
-- branch: `integration/offline-billy-bob-v1`
+Fresh verification during this pass confirmed:
 
-The worker could not push its local-only parent chain. The exact final tree was therefore published directly on top of GitHub `main` as:
+- the bundle is valid;
+- it contains `2c8549c6579409d6b114bfb2a8436d4ec23ecfca`;
+- the archived original and published equivalent both have tree `11b57ddc0e768cfbc7e1cdb7a7cd750383754c80`;
+- current integration head `d1dfb04...` passes **184 tests plus 80 subtests** from a fresh clone.
 
-- published commit: `fbaee89ae3cd504602f69e5a04d4720248fc515f`
-- published tree: `11b57ddc0e768cfbc7e1cdb7a7cd750383754c80`
-- published branch: `integration/offline-billy-bob-v1`
-
-The content is byte-identical at the Git tree level. Only the commit SHA and ancestry differ. The literal original commit and parent chain are also stored in a verified Git bundle on `archive/offline-billy-bob-v1-original-bundle` at `archive/offline-billy-bob-v1-original.bundle.b64`; its uploaded bytes exactly match the locally verified bundle and restore to `2c8549c...`. `main` was not modified.
+No manual preservation action is currently required from Darius. Do not delete the archive branch or bundle.
 
 ## Subsystem ledger
 
-| Subsystem | Owner | Repository / branch | Commit | Status | Dependencies | Blockers | Tests / evidence | Integration readiness | Next action |
+| Subsystem | Owner | Repo | Branch | Commit | Status | Tests | Blockers | Integration readiness | Next action |
 |---|---|---|---|---|---|---|---|---|---|
-| Architecture + v1 contracts | Architecture | `buisnessbuilder-future/main` | `a9f41060...` and ancestors | Released | None | Contract changes require explicit review | Parsed by compatibility tests | Ready | Preserve v1 compatibility |
-| Company Brain / Head | W1 | Integrated branch | Source `b5a44761...`; accepted integration `98805898...` | Integrated | v1/v2 contracts | None found in offline scope | Included in 99-test combined suite | Integrated offline | Review public adapter only; no internal coupling |
-| Core Runtime + nervous system / Torso | W2 | Integrated branch | Source `2148e04f...`; accepted integration `98805898...` | Integrated and repackaged under `businessbuilder.runtime` | Company Brain reader and Verification ports | Synchronous SQLite/in-process design is dev-only | Included in 99-test combined suite | Integrated offline | Independent diff/API review |
-| Verification / Left leg | W3 + targeted fix | Integrated branch | Source `1c6820c...`; accepted integration `98805898...` | Integrated with corrected readiness/retest gates | Company Brain invalidations; Runtime verification requests | JSON/in-memory repository is dev-only | Fresh remote clone: 99/99; recycled pre-failure/invalidation evidence rejected | Integrated offline | Keep verification as sole readiness authority |
-| Offline Integration | W4 + coordinator review | `integration/offline-billy-bob-v1` | Combined code checkpoint `1f5e25f9048c400d50faada3327cb19bc53c8f6a` | **Durable, combined, and green; main unchanged** | Company Brain + Runtime + Verification + W5/W6/W8 | Final v2 contract/adapter review still required before main | Fresh remote clone: 184 passed + 80 subtests; hosted CI run `34734633923` passed; Node checks passed | Integrated offline; not yet main-ready | Complete remaining contract/adapter review, then open reviewed PR to main |
-| Additive tenant-aware v2 contracts | W4 integration | Integrated branch | `fbaee89a...` | Added without removing v1 | v1 semantics | Must be reviewed as a deliberate public contract release; future real Website adapter must support v2 | Four v2 compatibility tests pass; all company-bound public objects require `tenant_id`; capability definition remains global | Review required | Freeze only after independent schema-diff review |
-| Setup/Admin / Left arm | W5 + independent reviewers | `worker5/setup-admin` → PR #2 → integration | Published `e051adf3...`; merge `db35170a...` | Accepted and integrated offline | Integrated public boundaries + released contracts | Live filing, purchase, professional advice and provider execution remain forbidden | Branch pytest: 136 + 4 subtests; confused-deputy, receipt-binding, idempotency and append-only history probes pass | Integrated offline | Connect to shared projections only through reviewed public seams |
-| AI Workforce Product / Right leg | W8 + independent reviewers | `worker8/ai-workforce-product` → PR #3 → integration | Published `b99612ad...`; merge `471595ff...` | Accepted and integrated offline | Integrated Runtime policy concepts + released contracts | No Sol/runtime/provider/model execution; real operational adapters remain future work | Branch pytest: 121 + 25 subtests; lifecycle epoch, cached-ALLOW and founder-bound vocabulary probes pass | Integrated offline | Keep policy layer separate from Sol and provider execution |
-| Product UI / Skin | W6 + independent reviewers | `worker6/build-room-ui` → PR #1 → integration | Published `02259d6c...`; merge `1f5e25f9...` | Accepted and integrated offline | Canonical read-only projections and fixture/event stream | Offline UI only; no live product API or production deploy | Branch pytest: 125 + 59 subtests; contract adapters, parity, Node syntax and accessibility-oriented checks pass | Integrated offline | Use as offline product proof; design live API separately after core acceptance |
-| Website engine / Right arm | Claude Code | `Stromation` Phase 1F | Main `cc10d9ea...`; active PRs #121-#123 | Active | Stromation internals only | Remaining stacked remediations and explicit reliable premium-output proof outstanding | PR #120 merged green; #121 green/mergeable; #122-#123 green but currently non-mergeable stacked changes | **Hold** | Monitor only; Claude must explicitly declare adapter-ready |
-| Website Capability adapter / Right-arm socket | W7 future | Not started | None | Held except offline fake | Stable contracts + explicit Claude readiness | Exact real mappings, retry/cancellation, evidence, and deployment observations unresolved | Fake capability proves only the platform seam | Not ready | Do not integrate the real engine yet |
-| Standalone Website Builder | Existing owner | `website-builder/main` | `c2eafeda...` | Stable transitional surface | Existing standalone flow | Browser-rendered visual QA not performed in current audit | Local release verification passed: 31 pages, 64 Node tests, link/copy/privacy/interaction checks | Preserve only | No unified-platform logic here |
-| Live infrastructure / production migration | Future | None | None | Explicitly deferred | Accepted offline system + Darius authorization | Production approval required | None | Not ready | Do not start |
+| Architecture + contracts | Architecture | `buisnessbuilder-future` | `main` / integration | `a9f41060...`; v2 from `fbaee89...` | v1 on main; additive v2 on integration | Covered by integration suite | Independent v1→v2 schema-diff review remains | Offline-ready; not main-release-ready | Review v2 compatibility before any main PR |
+| Company Brain | Worker 1 | `buisnessbuilder-future` | `main` | `b5a44761ce83f0032684f825829123380573536f` | Safely complete and pushed | Included in 184-test integration run | Production persistence/auth are intentionally deferred | Ready for offline integration | Preserve canonical state ownership |
+| Core Runtime | Worker 2 | `buisnessbuilder-future` | `worker2/core-runtime`; integrated equivalent on offline branch | `2148e04f13ba50ebb7c66662e9a937df1cd0fa6e` | Complete, pushed, integrated offline; not merged to main | Included in 184-test integration run | Dev-only in-process/SQLite boundaries; adapter review remains | Offline-ready | Review public adapters before a main PR |
+| Verification | Worker 3 + readiness correction | `buisnessbuilder-future` | `worker-3/verification-left-leg`; `fix/offline-readiness-proof`; integration | `1c6820c17912ca3b064138c613454092d48e0dc7`; fix `98805898...` | Complete, pushed, integrated offline; not merged to main | Included in 184-test integration run; stale evidence regressions pass | Repository is dev-only; verification must remain sole readiness authority | Offline-ready | Keep readiness fail-closed during adapter review |
+| Offline Integration | Worker 4 + corrections | `buisnessbuilder-future` | `integration/offline-billy-bob-v1` | Original `2c8549c...`; equivalent `fbaee89...`; current `d1dfb04...` | Durable and green; not merged to main | Fresh clone: 184 passed + 80 subtests | v2 schema review, adapter-boundary review, and current-head hosted CI evidence are still required | Offline-complete; not main-ready | Open a reviewed PR only after all three gates pass |
+| Setup/Admin | Worker 5 | `buisnessbuilder-future` | `worker5/setup-admin`; integration | `e051adf3dfc720770da1d2d7a42191e6363af635`; merge `db35170a...` | Complete, pushed, merged to integration; not main | Included in 184-test integration run | No live filing, purchase, provider execution, or professional advice | Offline-ready | Future review/hardening only; do not start now |
+| Build Room UI | Worker 6 | `buisnessbuilder-future` | `worker6/build-room-ui`; integration | `02259d6c1646db9fec57ba10ed75b59ea9a9774b`; merge `1f5e25f...` | Complete offline UI, pushed, merged to integration; not main | Included in 184-test integration run | No live API or production deployment; live design waits on core acceptance | Offline-ready | Future live-boundary design only; do not start now |
+| AI Workforce contracts/policy | Worker 8 | `buisnessbuilder-future` | `worker8/ai-workforce-product`; integration | `b99612adda039e3a28a7391b2522dfa667b66ab4`; merge `471595ff...` | Complete offline policy, pushed, merged to integration; not main | Included in 184-test integration run | No Sol/provider/model execution; public contract review remains | Offline-ready | Future contract freeze/review only; do not start now |
+| Website engine | Claude Code | `Stromation` | `main` / Phase 1F | `fbceb14bfcb8301750bb071fc1d2b811e732d944` | Active; recent Phase 1F fixes merged | Not rerun in this bounded pass; no workflow run attached to current head through the GitHub connector | No explicit adapter-ready declaration or final reliable premium-output proof | Held | Claude continues separately |
+| Real Website adapter | Future | `buisnessbuilder-future` ↔ `Stromation` | Not started | None | Blocked | Fake capability proves only the offline seam | Claude readiness, mappings, retry/cancellation, evidence and deployment observations | Not ready | Do not start |
+| Transitional Website Builder | Existing owner | `website-builder` | `main`; draft PR #1 | `c2eafeda43f89416fb135248151422de2799be04` | Stable transitional surface; draft redesign intake unmerged | Not rerun in this bounded pass | Draft PR requires its stated approval/visual gate | Preserve only | Leave draft unmerged |
+| Production/live infrastructure | Future | None | None | None | Deferred | None | Darius authorization, accepted core, security/operations design | Not ready | Do not start |
 
-## Verified offline journey
+## Completion classification
 
-The preserved integrated code proves:
+- **Safely complete:** Company Brain on `main`; exact integration history preservation; current offline integration test pass.
+- **Complete but not merged to `main`:** Core Runtime, Verification, Offline Integration, Setup/Admin, Build Room UI, and AI Workforce policy/contracts.
+- **Complete but not pushed:** none. The literal `2c8549c...` object is not a normal remote commit, but its exact history is pushed inside the verified bundle and its byte-identical tree is published.
+- **Still blocked on Claude:** the real Stromation Website Capability adapter and everything requiring Phase 1F adapter readiness.
 
-1. the real Company Brain supplies canonical Billy Bob state;
-2. Runtime creates a tenant/company-scoped website job and enforces founder-only digest-bound approval;
-3. Runtime reserves 400 minor units, the fake website capability settles 271, and 129 is released;
-4. Runtime emits canonical progress, completion, audit, and `verification.requested` events;
-5. the real Runtime-to-Verification adapter creates deterministic Proposed records without duplicate side effects;
-6. the `package_ready` checkpoint leaves all verification Proposed and readiness `false/false`, with no deployment or live inference;
-7. a distinct deterministic offline deployment/QA phase supplies explicitly non-live evidence for deployment, HTTPS, links, mobile, and the remaining customer path;
-8. Verification then moves readiness to Ready `true` / Fully Set `false`, then `true/true` after admin completion;
-9. a Company Brain service-area version change invalidates geography-bound verification and returns readiness to `false/false`;
-10. tenant/company mismatches, same-company cross-tenant evidence, unapproved offer/market facts, partial dependency writes, incomplete scenario sets, stale writes, invalid transitions, budget overrun, and unauthorized approval fail closed.
+## Exact blockers
 
-## Review gates before merging integration to main
+1. Claude has not explicitly declared the Stromation website engine adapter-ready with reliable premium-output proof.
+2. The integration branch still needs an independent v1→v2 schema-diff review.
+3. The Company Brain/Runtime/Verification adapter boundaries still need an independent public-seam review.
+4. No hosted CI result is attached to current integration head `d1dfb04...` through the GitHub connector; the fresh-clone local suite is green.
+5. Production deployment and live provider integrations require separate architecture/security work and Darius authorization.
+6. Website Builder draft PR #1 remains intentionally unmerged pending its stated approval and visual-check gate.
 
-1. Compare every v2 schema to v1 and confirm the only semantic change is required `tenant_id` plus version identifiers.
-2. Inspect `CompanyBrainRuntimeAdapter`, `CompanyBrainVerificationAdapter`, `RuntimeVerificationAdapter`, and `VerificationInvalidationAdapter` for internal imports or duplicated authority.
-3. Re-review the corrected proof that `package_ready` cannot become live, Ready, or Fully Set without a distinct deployment/QA evidence phase.
-4. Keep hosted CI green; combined run `34734633923` passed and a fresh remote clone passed 184 tests plus 80 subtests.
-5. Preserve the reviewed ownership boundaries when wiring Setup/Admin, AI Workforce and Build Room into future live adapters.
-6. Open a reviewed PR; do not merge merely because tests pass.
+## NEXT WAVE
 
-## Test command
+Do not start these in this pass. Their offline implementations already exist on the integration branch; future work should be bounded to:
 
-```bash
-PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
-```
+1. **Setup/Admin** — review and harden shared public seams.
+2. **Build Room UI** — design the future live read-only API boundary after core acceptance.
+3. **AI Workforce contracts** — independently review and freeze the public policy contract before any execution adapter.
+
+## DO NOT TOUCH YET
+
+- Real Stromation website adapter
+- Production cloud deployment
+- Live provider integrations
+- Anything dependent on Phase 1F readiness
