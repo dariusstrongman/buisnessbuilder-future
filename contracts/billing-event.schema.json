@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v1/billing-event.schema.json",
+  "title": "Normalized Billing Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "tenant_id", "user_id", "company_id", "occurred_at", "provider", "provider_event_ref", "correlation_id"],
+  "properties": {
+    "schema_version": {"const": "billing-event.v1"},
+    "event_id": {"$ref": "common.schema.json#/$defs/id"},
+    "event_type": {"enum": ["billing.checkout.completed", "billing.payment.succeeded", "billing.payment.failed", "billing.subscription.created", "billing.subscription.updated", "billing.subscription.canceled", "billing.refund.created"]},
+    "tenant_id": {"$ref": "common.schema.json#/$defs/id"},
+    "user_id": {"$ref": "common.schema.json#/$defs/id"},
+    "company_id": {"$ref": "common.schema.json#/$defs/id"},
+    "occurred_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "provider": {"type": "string", "minLength": 1, "maxLength": 100},
+    "provider_event_ref": {"type": "string", "minLength": 1, "maxLength": 255},
+    "correlation_id": {"$ref": "common.schema.json#/$defs/id"},
+    "order_id": {"type": ["string", "null"], "maxLength": 128},
+    "checkout_intent_id": {"type": ["string", "null"], "maxLength": 128},
+    "payment_provider_ref": {"type": ["string", "null"], "maxLength": 255},
+    "subscription_provider_ref": {"type": ["string", "null"], "maxLength": 255},
+    "subscription_status": {"type": ["string", "null"]},
+    "amount": {"oneOf": [{"$ref": "common.schema.json#/$defs/money"}, {"type": "null"}]},
+    "current_period": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["starts_at", "ends_at"], "properties": {"starts_at": {"$ref": "common.schema.json#/$defs/timestamp"}, "ends_at": {"$ref": "common.schema.json#/$defs/timestamp"}}},
+        {"type": "null"}
+      ]
+    },
+    "reason": {"type": ["string", "null"], "maxLength": 2000}
+  }
+}

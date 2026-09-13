@@ -18,6 +18,8 @@ Tenant-scoped nervous-system boundaries also have additive `*.v2.schema.json` sc
 | FounderAction | `founder-action.schema.json` | Human-only actions and completion evidence |
 | AuditEvent | `audit-event.schema.json` | Append-only accountable state-change receipt |
 | Website Capability | `website-capability.schema.json` | Stable plug-in seam for Stromation's website engine |
+| Normalized Billing Event | `billing-event.schema.json` | Provider-neutral, tenant/user/company-scoped billing input |
+| Commercial Event | `commercial-event.schema.json` | Orders/entitlements output consumed through Runtime's event seam |
 
 Rules:
 

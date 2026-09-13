@@ -1,6 +1,6 @@
-# Builder Product Layer — Artifact Index
+# Business Builder
 
-Independent product-definition workstream. No production repository or live system was accessed or changed.
+Offline, provider-neutral product architecture and implementation. No live provider or production service is configured by this repository.
 
 1. [Decision memo and complete product definition](./docs/product-package.md)
 2. [Clickable Billy Bob prototype](./prototype/index.html)
@@ -13,5 +13,9 @@ Independent product-definition workstream. No production repository or live syst
 - [Integration plan](./docs/INTEGRATION_PLAN.md)
 - [Parallel build plan](./docs/PARALLEL_BUILD_PLAN.md)
 - [Shared contracts](./contracts/README.md)
+- [Identity and accounts](./docs/IDENTITY_AND_ACCOUNTS.md)
+- [Orders, billing, and entitlements](./docs/ORDERS_BILLING_ENTITLEMENTS.md)
+- [Commercial event model](./docs/COMMERCIAL_EVENT_MODEL.md)
+- [Run My Business lifecycle](./docs/RUN_MY_BUSINESS_LIFECYCLE.md)
 
 Open `prototype/index.html` in a browser. The main journey supports offer selection, intake, recommendation approval, build-room execution, evidence inspection, founder-only actions, readiness, handoff, and Run My Business.
