@@ -6,6 +6,7 @@ from threading import RLock
 from typing import Any, Iterator, Sequence
 
 import psycopg
+from psycopg import sql
 
 from businessbuilder._serialization import decode_record, encode_record
 from businessbuilder.commercial.models import (
@@ -332,20 +333,25 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
         replace_row: bool = False,
     ) -> None:
         conflict = (
-            "DO UPDATE SET tenant_id=EXCLUDED.tenant_id, "
-            "company_id=EXCLUDED.company_id, body=EXCLUDED.body"
+            sql.SQL(
+                "DO UPDATE SET tenant_id=EXCLUDED.tenant_id, "
+                "company_id=EXCLUDED.company_id, body=EXCLUDED.body"
+            )
             if replace_row
-            else "DO NOTHING"
+            else sql.SQL("DO NOTHING")
         )
+        returning = sql.SQL("") if replace_row else sql.SQL("RETURNING version")
         with self.connection.cursor() as cursor:
             cursor.execute(
-                f"""
+                sql.SQL(
+                    """
                 INSERT INTO bb_commercial_records(
                     kind, scope_key, version, tenant_id, company_id, body
                 ) VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (kind, scope_key, version) {conflict}
-                {'' if replace_row else 'RETURNING version'}
-                """,
+                ON CONFLICT (kind, scope_key, version) {}
+                {}
+                """
+                ).format(conflict, returning),
                 (kind, key, version, tenant_id, company_id, encode_record(value)),
             )
             if not replace_row and cursor.fetchone() is None:
