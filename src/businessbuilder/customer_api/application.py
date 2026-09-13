@@ -1,0 +1,816 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from http import HTTPStatus
+import re
+from typing import Any, Callable, Mapping
+
+from businessbuilder.build_room.projection import ScopedEnvelope, project_build_room
+from businessbuilder.commercial import Amount, CommercialService
+from businessbuilder.commercial.repository import CommercialRepository
+from businessbuilder.company_brain import (
+    Company,
+    CompanyBrainService,
+    EntityRef,
+    LifecycleState,
+    Provenance,
+    RecordKind,
+    Scope,
+)
+from businessbuilder.identity import (
+    AuthenticatedPrincipal,
+    AuthorizationContext,
+    AuthorizationDenied,
+    IdentityError,
+    IdentityAuditEvent,
+    IdentityRepository,
+    MembershipStatus,
+    Permission,
+    PrincipalContextAuthority,
+    Role,
+)
+from businessbuilder.integration import CompanyBrainVerificationAdapter
+from businessbuilder.runtime.models import ApprovalState
+from businessbuilder.runtime.orchestrator import JobOrchestrator
+from businessbuilder.runtime.storage import RuntimeRepository
+from businessbuilder.verification import ReadinessEvaluator, VerificationService, VerificationState
+
+
+_COMPANY_ROUTE = re.compile(r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})$")
+_COMPANY_CHILD_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/(build-room|founder-actions|readiness|handoff)$"
+)
+_APPROVAL_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/approvals/([A-Za-z0-9_-]{1,128})$"
+)
+_ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
+_FORGED_AUTHORITY_HEADERS = frozenset(
+    {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiResponse:
+    status: HTTPStatus
+    body: dict[str, Any]
+    allow: tuple[str, ...] = ()
+
+
+class ApiFailure(Exception):
+    def __init__(
+        self,
+        status: HTTPStatus,
+        code: str,
+        message: str,
+        *,
+        allow: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.allow = allow
+
+
+class CustomerApi:
+    """Thin API facade over existing Business Builder service authorities."""
+
+    def __init__(
+        self,
+        *,
+        identity_repository: IdentityRepository,
+        principal_authority: PrincipalContextAuthority,
+        company_brain: CompanyBrainService,
+        runtime: JobOrchestrator,
+        runtime_repository: RuntimeRepository,
+        verification: VerificationService,
+        readiness: ReadinessEvaluator,
+        company_snapshots: CompanyBrainVerificationAdapter,
+        commercial: CommercialService,
+        commercial_repository: CommercialRepository,
+        id_factory: Callable[[str], str],
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.identity_repository = identity_repository
+        self.principal_authority = principal_authority
+        self.company_brain = company_brain
+        self.runtime = runtime
+        self.runtime_repository = runtime_repository
+        self.verification = verification
+        self.readiness = readiness
+        self.company_snapshots = company_snapshots
+        self.commercial = commercial
+        self.commercial_repository = commercial_repository
+        self.id_factory = id_factory
+        self.clock = clock
+
+    def close(self) -> None:
+        """Close unique repository resources owned by the composition root."""
+        resources = (
+            self.identity_repository,
+            self.commercial_repository,
+            self.runtime_repository,
+            self.verification.repository,
+            self.company_brain.repository,
+        )
+        closed: set[int] = set()
+        for resource in resources:
+            if id(resource) in closed:
+                continue
+            closed.add(id(resource))
+            close = getattr(resource, "close", None)
+            if close:
+                close()
+
+    def handle(
+        self,
+        *,
+        method: str,
+        path: str,
+        headers: Mapping[str, str],
+        query: Mapping[str, list[str]],
+        body: object,
+        request_id: str,
+        correlation_id: str,
+    ) -> ApiResponse:
+        lowered = {key.lower(): value for key, value in headers.items()}
+        raw_token: str | None = None
+        actor_id = "unknown"
+        try:
+            raw_token = self._bearer(lowered.get("authorization"))
+            user = self.principal_authority.authenticate_session(raw_token)
+            actor_id = user.user_id
+            forged = sorted(name for name in _FORGED_AUTHORITY_HEADERS if lowered.get(name))
+            if forged:
+                self._audit_denial(
+                    actor_id,
+                    "unresolved",
+                    None,
+                    "api.authority_context",
+                    "caller supplied forbidden authority headers",
+                    request_id,
+                    correlation_id,
+                )
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "request authority is server-derived")
+            support_session_id = lowered.get("x-support-impersonation-session") or None
+            return self._route(
+                method,
+                path,
+                query,
+                body,
+                raw_token,
+                user,
+                support_session_id,
+                request_id,
+                correlation_id,
+            )
+        except ApiFailure as exc:
+            return ApiResponse(
+                exc.status,
+                {"status": "error", "error": exc.code, "message": exc.message},
+                exc.allow,
+            )
+        except AuthorizationDenied:
+            return ApiResponse(
+                HTTPStatus.UNAUTHORIZED,
+                {"status": "error", "error": "unauthorized", "message": "active authentication required"},
+            )
+        except (KeyError, LookupError, IdentityError):
+            return ApiResponse(
+                HTTPStatus.NOT_FOUND,
+                {"status": "error", "error": "not_found", "message": "resource not found"},
+            )
+        except (TypeError, ValueError):
+            return ApiResponse(
+                HTTPStatus.BAD_REQUEST,
+                {"status": "error", "error": "invalid_request", "message": "request validation failed"},
+            )
+        except PermissionError:
+            return ApiResponse(
+                HTTPStatus.FORBIDDEN,
+                {"status": "error", "error": "forbidden", "message": "operation is not permitted"},
+            )
+
+    def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        if path == "/api/v1/me":
+            self._method(method, "GET")
+            return ApiResponse(HTTPStatus.OK, {"user": self._user(user)})
+        if path == "/api/v1/organizations":
+            self._method(method, "GET")
+            scopes = self._accessible_memberships(token, user.user_id, support)
+            organizations = [self._organization(org, principal) for principal, _, org in scopes]
+            return ApiResponse(HTTPStatus.OK, {"organizations": organizations})
+        if path == "/api/v1/memberships":
+            self._method(method, "GET")
+            scopes = self._accessible_memberships(token, user.user_id, support)
+            return ApiResponse(
+                HTTPStatus.OK,
+                {"memberships": [self._membership(item, org) for _, item, org in scopes]},
+            )
+        if path == "/api/v1/companies":
+            if method == "GET":
+                return ApiResponse(
+                    HTTPStatus.OK,
+                    {"companies": self._list_companies(token, user.user_id, support, request_id, correlation_id)},
+                )
+            if method == "POST":
+                return ApiResponse(
+                    HTTPStatus.CREATED,
+                    {"company": self._create_company(token, user.user_id, support, body, request_id, correlation_id)},
+                )
+            self._method(method, "GET", "POST")
+
+        match = _COMPANY_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            principal = self._company_principal(
+                token, user.user_id, match.group(1), support, Permission.VIEW_COMPANY_STATE,
+                request_id, correlation_id,
+            )
+            return ApiResponse(HTTPStatus.OK, {"company": self._company(principal)})
+
+        match = _COMPANY_CHILD_ROUTE.fullmatch(path)
+        if match:
+            company_id, child = match.groups()
+            if child == "handoff" and method == "POST":
+                self._company_principal(
+                    token, user.user_id, company_id, support, Permission.PERFORM_HANDOFF,
+                    request_id, correlation_id,
+                )
+                raise ApiFailure(
+                    HTTPStatus.CONFLICT,
+                    "handoff_not_available",
+                    "handoff requires a dedicated authoritative workflow",
+                )
+            self._method(method, "GET")
+            permission = Permission.ACCESS_ARTIFACTS if child == "build-room" else Permission.VIEW_COMPANY_STATE
+            principal = self._company_principal(
+                token, user.user_id, company_id, support, permission,
+                request_id, correlation_id,
+            )
+            if child == "build-room":
+                return ApiResponse(HTTPStatus.OK, {"build_room": self._build_room(principal)})
+            if child == "founder-actions":
+                return ApiResponse(HTTPStatus.OK, {"founder_actions": self._founder_actions(principal)})
+            if child == "readiness":
+                return ApiResponse(HTTPStatus.OK, {"readiness": self._readiness(principal)})
+            return ApiResponse(HTTPStatus.OK, {"handoff": self._handoff(principal)})
+
+        match = _APPROVAL_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "POST")
+            company_id, approval_id = match.groups()
+            principal = self._company_principal(
+                token, user.user_id, company_id, support, Permission.VIEW_COMPANY_STATE,
+                request_id, correlation_id,
+            )
+            values = self._object(body, allowed={"decision"})
+            if values.get("decision", "granted") != "granted":
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "only explicit granted decisions are supported")
+            approval = self.runtime_repository.get_approval(
+                principal.tenant_id, company_id, approval_id
+            )
+            if approval is None:
+                self._deny(principal, Permission.APPROVE_FOUNDER_DECISIONS, "approval scope mismatch", request_id, correlation_id)
+            job = self.runtime.approve_job(
+                tenant_id=principal.tenant_id,
+                company_id=company_id,
+                job_id=approval.job_id,
+                approval_id=approval_id,
+                principal=principal,
+            )
+            decided = self.runtime_repository.get_approval(
+                principal.tenant_id, company_id, approval_id
+            )
+            return ApiResponse(HTTPStatus.OK, {"approval": self._approval(decided), "job_status": job.status.value})
+
+        if path == "/api/v1/orders":
+            if method == "POST":
+                values = self._object(body, required={"company_id", "product_version_id"}, allowed={"company_id", "product_version_id"})
+                company_id = self._identifier(values["company_id"], "company_id")
+                principal = self._company_principal(
+                    token, user.user_id, company_id, support, Permission.AUTHORIZE_SPEND,
+                    request_id, correlation_id,
+                )
+                order = self.commercial.create_order(
+                    self._context(principal),
+                    self._identifier(values["product_version_id"], "product_version_id"),
+                )
+                return ApiResponse(HTTPStatus.CREATED, {"order": self._order(order)})
+            if method == "GET":
+                principal = self._query_company(
+                    query, token, user.user_id, support, Permission.VIEW_BILLING,
+                    request_id, correlation_id,
+                )
+                orders = self.commercial_repository.list_current_orders(
+                    principal.tenant_id, principal.company_id or ""
+                )
+                return ApiResponse(HTTPStatus.OK, {"orders": [self._order(item) for item in orders]})
+            self._method(method, "GET", "POST")
+
+        match = _ORDER_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.VIEW_BILLING,
+                request_id, correlation_id,
+            )
+            order = self.commercial_repository.get_order(
+                principal.tenant_id, principal.company_id or "", match.group(1)
+            )
+            return ApiResponse(HTTPStatus.OK, {"order": self._order(order)})
+
+        if path in {"/api/v1/subscriptions", "/api/v1/entitlements"}:
+            self._method(method, "GET")
+            permission = Permission.VIEW_BILLING if path.endswith("subscriptions") else Permission.VIEW_COMPANY_STATE
+            principal = self._query_company(
+                query, token, user.user_id, support, permission, request_id, correlation_id
+            )
+            if path.endswith("subscriptions"):
+                values = self.commercial_repository.list_current_subscriptions(
+                    principal.tenant_id, principal.company_id or ""
+                )
+                return ApiResponse(HTTPStatus.OK, {"subscriptions": [self._subscription(item) for item in values]})
+            values = self.commercial_repository.get_current_entitlement_grants(
+                principal.tenant_id, principal.company_id or ""
+            )
+            return ApiResponse(HTTPStatus.OK, {"entitlements": [self._entitlement(item) for item in values]})
+
+        raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+
+    @staticmethod
+    def _bearer(value: str | None) -> str:
+        if not value or len(value) > 4096:
+            raise AuthorizationDenied("bearer token required")
+        scheme, separator, token = value.partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not token or " " in token:
+            raise AuthorizationDenied("valid bearer token required")
+        return token
+
+    @staticmethod
+    def _method(actual: str, *allowed: str) -> None:
+        if actual not in allowed:
+            raise ApiFailure(
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "method not allowed",
+                allow=tuple(allowed),
+            )
+
+    @staticmethod
+    def allowed_methods(path: str) -> tuple[str, ...]:
+        """Return only methods supported by a recognized customer route."""
+        if path == "/api/v1/companies" or path == "/api/v1/orders":
+            return ("GET", "POST")
+        child = _COMPANY_CHILD_ROUTE.fullmatch(path)
+        if child:
+            return ("GET", "POST") if child.group(2) == "handoff" else ("GET",)
+        if _APPROVAL_ROUTE.fullmatch(path):
+            return ("POST",)
+        if (
+            path in {
+                "/api/v1/me",
+                "/api/v1/organizations",
+                "/api/v1/memberships",
+                "/api/v1/subscriptions",
+                "/api/v1/entitlements",
+            }
+            or _COMPANY_ROUTE.fullmatch(path)
+            or _ORDER_ROUTE.fullmatch(path)
+        ):
+            return ("GET",)
+        return ()
+
+    @staticmethod
+    def _object(body: object, *, required=frozenset(), allowed=frozenset()) -> dict[str, Any]:
+        if body is None:
+            body = {}
+        if not isinstance(body, dict) or set(body) - set(allowed) or set(required) - set(body):
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "request body has invalid fields")
+        return dict(body)
+
+    @staticmethod
+    def _identifier(value: object, field: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", f"{field} is invalid")
+        return value
+
+    def _accessible_memberships(self, token, user_id, support):
+        values = []
+        for membership in self.identity_repository.list_user_memberships(user_id):
+            if membership.status is not MembershipStatus.ACTIVE:
+                continue
+            try:
+                organization = self.identity_repository.get_organization(membership.organization_id)
+                company_id = None
+                support_id = None
+                if membership.role is Role.SUPPORT:
+                    if not support:
+                        continue
+                    session = self.identity_repository.get_support_session(support)
+                    if session.tenant_id != membership.tenant_id:
+                        continue
+                    company_id = session.company_id
+                    support_id = support
+                principal = self.principal_authority.issue(
+                    token,
+                    tenant_id=membership.tenant_id,
+                    company_id=company_id,
+                    support_impersonation_session_id=support_id,
+                )
+                values.append((principal, membership, organization))
+            except (IdentityError, LookupError):
+                continue
+        return tuple(values)
+
+    def _company_principal(self, token, user_id, company_id, support, permission, request_id, correlation_id):
+        candidate_tenants: list[str] = []
+        for membership in self.identity_repository.list_user_memberships(user_id):
+            if membership.status is not MembershipStatus.ACTIVE:
+                continue
+            try:
+                organization = self.identity_repository.get_organization(membership.organization_id)
+            except LookupError:
+                continue
+            if company_id in organization.company_ids:
+                candidate_tenants.append(membership.tenant_id)
+        if len(set(candidate_tenants)) != 1:
+            self._audit_denial(user_id, "unresolved", company_id, permission.value, "company scope mismatch", request_id, correlation_id)
+            raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+        tenant_id = candidate_tenants[0]
+        try:
+            principal = self.principal_authority.issue(
+                token,
+                tenant_id=tenant_id,
+                company_id=company_id,
+                support_impersonation_session_id=support,
+            )
+            self.commercial.authorization.require(
+                self._context(principal), permission, at=self.clock()
+            )
+            return principal
+        except (IdentityError, LookupError) as exc:
+            self._audit_denial(user_id, tenant_id, company_id, permission.value, type(exc).__name__, request_id, correlation_id)
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted") from None
+
+    def _query_company(self, query, token, user_id, support, permission, request_id, correlation_id):
+        values = query.get("company_id", [])
+        if len(values) != 1:
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "one company_id selector is required")
+        company_id = self._identifier(values[0], "company_id")
+        return self._company_principal(token, user_id, company_id, support, permission, request_id, correlation_id)
+
+    def _deny(self, principal, permission, reason, request_id, correlation_id):
+        self._audit_denial(principal.user_id, principal.tenant_id, principal.company_id, permission.value, reason, request_id, correlation_id)
+        raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+
+    def _audit_denial(self, actor_id, tenant_id, company_id, permission, reason, request_id, correlation_id):
+        self.identity_repository.append_audit(
+            IdentityAuditEvent(
+                self.id_factory("identity_audit"),
+                tenant_id,
+                actor_id,
+                "authorization.denied",
+                "permission",
+                permission,
+                self.clock(),
+                reason,
+                "businessbuilder.customer_api",
+                company_id,
+                {"request_id": request_id, "correlation_id": correlation_id},
+            )
+        )
+
+    @staticmethod
+    def _context(principal):
+        return AuthorizationContext(
+            principal.user_id,
+            principal.tenant_id,
+            principal.company_id,
+            principal.support_impersonation_session_id,
+        )
+
+    def _list_companies(self, token, user_id, support, request_id, correlation_id):
+        results = []
+        seen = set()
+        for _, _, organization in self._accessible_memberships(token, user_id, support):
+            for company_id in organization.company_ids:
+                if company_id in seen:
+                    continue
+                try:
+                    principal = self._company_principal(
+                        token, user_id, company_id, support, Permission.VIEW_COMPANY_STATE,
+                        request_id, correlation_id,
+                    )
+                    results.append(self._company(principal))
+                    seen.add(company_id)
+                except ApiFailure:
+                    continue
+        return results
+
+    def _create_company(self, token, user_id, support, body, request_id, correlation_id):
+        values = self._object(
+            body,
+            required={"display_name", "archetype", "jurisdiction"},
+            allowed={"display_name", "legal_name", "archetype", "jurisdiction", "organization_id"},
+        )
+        if support:
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "support cannot create companies")
+        choices = [
+            (principal, membership, organization)
+            for principal, membership, organization in self._accessible_memberships(token, user_id, None)
+            if membership.role is Role.OWNER
+            and (not values.get("organization_id") or organization.organization_id == values["organization_id"])
+        ]
+        if len(choices) != 1:
+            self._audit_denial(user_id, "unresolved", None, Permission.APPROVE_FOUNDER_DECISIONS.value, "organization scope mismatch", request_id, correlation_id)
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "one owned organization is required")
+        principal, _, _ = choices[0]
+        display_name = values["display_name"]
+        archetype = values["archetype"]
+        jurisdiction = values["jurisdiction"]
+        if not isinstance(display_name, str) or not display_name.strip() or len(display_name) > 200:
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "display_name is invalid")
+        if not isinstance(archetype, str) or not archetype.strip() or len(archetype) > 100:
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "archetype is invalid")
+        if not isinstance(jurisdiction, dict) or len(jurisdiction) > 20:
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "jurisdiction is invalid")
+        company_id = self.id_factory("company")
+        stamp = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        company = Company(
+            Scope(principal.tenant_id, company_id),
+            display_name.strip(),
+            archetype.strip(),
+            jurisdiction,
+            (EntityRef("user", principal.user_id),),
+            lifecycle=LifecycleState.DRAFT,
+            legal_name=(values.get("legal_name") or None),
+            provenance=(
+                Provenance(
+                    "authenticated_customer",
+                    stamp,
+                    EntityRef("user", principal.user_id),
+                    source_ref=f"request:{request_id}",
+                ),
+            ),
+        )
+        self.company_brain.create_company(company)
+        from businessbuilder.identity import IdentityService
+        identity = IdentityService(
+            self.identity_repository, id_factory=self.id_factory, clock=self.clock
+        )
+        identity.attach_company(
+            AuthorizationContext(principal.user_id, principal.tenant_id), company_id
+        )
+        scoped = self.principal_authority.issue(token, tenant_id=principal.tenant_id, company_id=company_id)
+        return self._company(scoped)
+
+    def _company(self, principal):
+        company = self.company_brain.get_company(Scope(principal.tenant_id, principal.company_id or ""))
+        return {
+            "company_id": company.scope.company_id,
+            "display_name": company.display_name,
+            "legal_name": company.legal_name,
+            "archetype": company.archetype,
+            "jurisdiction": dict(company.jurisdiction),
+            "lifecycle": company.lifecycle.value,
+            "version": company.version,
+        }
+
+    @staticmethod
+    def _user(user):
+        return {
+            "user_id": user.user_id,
+            "email": user.email,
+            "status": user.status.value,
+            "email_verified": user.email_verified_at is not None,
+        }
+
+    @staticmethod
+    def _organization(organization, principal):
+        return {
+            "organization_id": organization.organization_id,
+            "display_name": organization.display_name,
+            "status": organization.status.value,
+            "role": principal.role.value,
+        }
+
+    @staticmethod
+    def _membership(item, organization):
+        return {
+            "membership_id": item.membership_id,
+            "organization_id": organization.organization_id,
+            "organization_name": organization.display_name,
+            "role": item.role.value,
+            "status": item.status.value,
+        }
+
+    @staticmethod
+    def _order(order):
+        return {
+            "order_id": order.order_id,
+            "company_id": order.company_id,
+            "status": order.status.value,
+            "items": [
+                {
+                    "product_code": item.product_code.value,
+                    "product_version_id": item.product_version_id,
+                    "package_name": item.package_name_snapshot,
+                    "billing_mode": item.billing_mode.value,
+                    "quantity": item.quantity,
+                }
+                for item in order.items
+            ],
+            "total": CustomerApi._amount(order.total),
+            "created_at": CustomerApi._time(order.created_at),
+            "updated_at": CustomerApi._time(order.updated_at),
+            "version": order.version,
+        }
+
+    @staticmethod
+    def _subscription(item):
+        return {
+            "subscription_id": item.subscription_id,
+            "company_id": item.company_id,
+            "order_id": item.order_id,
+            "product_code": item.plan.product_code.value,
+            "status": item.status.value,
+            "renewal_state": item.renewal_state.value,
+            "period": {"starts_at": CustomerApi._time(item.billing_period.starts_at), "ends_at": CustomerApi._time(item.billing_period.ends_at)},
+            "version": item.version,
+        }
+
+    @staticmethod
+    def _entitlement(item):
+        return {
+            "entitlement_id": item.grant_id,
+            "company_id": item.company_id,
+            "code": item.entitlement_code,
+            "class": item.entitlement_class.value,
+            "status": item.status.value,
+            "effective_until": CustomerApi._time(item.effective_until),
+            "version": item.version,
+        }
+
+    @staticmethod
+    def _approval(item):
+        return {
+            "approval_id": item.approval_id,
+            "company_id": item.company_id,
+            "state": item.state.value,
+            "required_role": item.required_role,
+            "decided_by": item.decided_by,
+            "decided_by_role": item.decided_by_role,
+            "expires_at": CustomerApi._time(item.expires_at),
+            "version": item.version,
+        }
+
+    def _readiness(self, principal):
+        snapshot = self.company_snapshots.get_snapshot(principal.tenant_id, principal.company_id or "")
+        value = self.readiness.evaluate(snapshot, at=self.clock())
+        return {
+            "authority": "verification",
+            "ready": value.ready,
+            "fully_set": value.fully_set,
+            "unmet_ready": list(value.unmet_ready),
+            "unmet_fully_set": list(value.unmet_fully_set),
+            "blocking_ids": list(value.blocking_ids),
+            "evaluated_at": self._time(value.evaluated_at),
+        }
+
+    def _founder_actions(self, principal):
+        records = self.company_brain.query_current_state(
+            Scope(principal.tenant_id, principal.company_id or ""), kinds=(RecordKind.FOUNDER_ACTION,)
+        )
+        allowed = {"title", "reason", "instructions", "risk", "irreversible", "state", "required_evidence_kinds", "due_at", "critical", "selected"}
+        return [
+            {"founder_action_id": item.record_id, **{key: value for key, value in item.data.items() if key in allowed}, "version": item.version}
+            for item in records
+        ]
+
+    def _handoff(self, principal):
+        records = self.verification.list_for_company(principal.tenant_id, principal.company_id or "")
+        handoff = next((item for item in records if item.definition_id == "handoff.complete"), None)
+        verified = bool(handoff and handoff.state is VerificationState.VERIFIED and handoff.is_current(self.clock()))
+        return {
+            "company_id": principal.company_id,
+            "state": "verified" if verified else "incomplete",
+            "authority": "verification",
+            "verification_id": handoff.verification_id if handoff else None,
+        }
+
+    def _build_room(self, principal):
+        tenant_id, company_id = principal.tenant_id, principal.company_id or ""
+        company = self._company(principal)
+        internal_company = {"tenant_id": tenant_id, **company}
+        readiness = self._readiness(principal)
+        jobs = self.runtime_repository.list_jobs(tenant_id, company_id)
+        approvals = self.runtime_repository.list_approvals(tenant_id, company_id)
+        verifications = self.verification.list_for_company(tenant_id, company_id)
+        evidence = {
+            item.evidence_id: item
+            for verification in verifications
+            for item in verification.evidence
+        }
+        job_by_id = {item.job_id: item for item in jobs}
+        budgets = self.runtime_repository.list_budgets(tenant_id, company_id)
+        budget = budgets[0] if budgets else None
+        projected = project_build_room(
+            generated_at=self._time(self.clock()),
+            source=ScopedEnvelope(tenant_id, company_id, {"company": "company_brain", "execution": "runtime", "readiness": "verification"}),
+            company=internal_company,
+            readiness=ScopedEnvelope(tenant_id, company_id, readiness),
+            budget=ScopedEnvelope(
+                tenant_id,
+                company_id,
+                {
+                    "currency": budget.ceiling.currency if budget else "USD",
+                    "ceiling_minor": budget.ceiling.minor_units if budget else 0,
+                    "reserved_minor": budget.reserved_minor if budget else 0,
+                    "settled_minor": budget.settled_minor if budget else 0,
+                },
+            ),
+            jobs=(
+                {
+                    "tenant_id": tenant_id, "company_id": company_id, "id": item.job_id,
+                    "kind": "job", "title": item.capability.replace(".", " ").title(),
+                    "description": str(item.inputs.get("objective", "")), "owner": "Runtime",
+                    "status": item.contract_status(), "dependency_ids": list(item.dependency_ids),
+                    "cost_minor": item.settled_minor, "evidence_refs": [], "order": index,
+                }
+                for index, item in enumerate(jobs, 1)
+            ),
+            verifications=(
+                {
+                    "tenant_id": tenant_id, "company_id": company_id, "id": item.verification_id,
+                    "kind": "verification", "title": item.definition_id.replace(".", " ").title(),
+                    "description": item.scope, "owner": item.owner or "Verification",
+                    "status": item.state.value, "dependency_ids": [dep.dependency_id for dep in item.dependencies],
+                    "cost_minor": 0, "evidence_refs": [f"artifact:{entry.artifact_ref}" for entry in item.evidence],
+                    "order": index + len(jobs),
+                }
+                for index, item in enumerate(verifications, 1)
+            ),
+            approvals=(
+                {
+                    "tenant_id": tenant_id, "company_id": company_id, "approval_id": item.approval_id,
+                    "title": "Approval required", "summary": "Review the exact Runtime subject before deciding.",
+                    "state": item.state.value, "subject_digest": item.subject_digest,
+                    "subject_ref": f"job:{item.job_id}", "required_approver_role": item.required_role,
+                    "requested_at": self._time(job_by_id[item.job_id].created_at) if item.job_id in job_by_id else self._time(self.clock()),
+                    "decided_at": None, "expires_at": self._time(item.expires_at),
+                }
+                for item in approvals
+            ),
+            evidence=(
+                {
+                    "tenant_id": tenant_id, "company_id": company_id, "evidence_id": item.evidence_id,
+                    "title": item.evidence_type.value.replace("_", " ").title(), "evidence_type": item.evidence_type.value,
+                    "artifact_ref": item.artifact_ref, "captured_at": self._time(item.captured_at),
+                    "expires_at": self._time(item.expires_at), "issuer": item.issuer,
+                    "test_name": item.test_name, "test_passed": item.test_passed,
+                }
+                for item in evidence.values()
+            ),
+            founder_actions=(
+                {"tenant_id": tenant_id, "company_id": company_id, "order": index, **item}
+                for index, item in enumerate(self._founder_actions(principal), 1)
+            ),
+            blockers=(),
+            events=(),
+            handoff=ScopedEnvelope(tenant_id, company_id, self._handoff(principal)),
+        ).to_dict()
+        return self._remove_internal_scope(projected)
+
+    @staticmethod
+    def _remove_internal_scope(value):
+        if isinstance(value, dict):
+            internal = {
+                "tenant_id",
+                "user_id",
+                "token_digest",
+                "provider_ref",
+                "payment_intent_ref",
+                "checkout_intent_id",
+                "subject_digest",
+                "provenance",
+            }
+            return {
+                key: CustomerApi._remove_internal_scope(item)
+                for key, item in value.items()
+                if key not in internal
+            }
+        if isinstance(value, list):
+            return [CustomerApi._remove_internal_scope(item) for item in value]
+        return value
+
+    @staticmethod
+    def _amount(value: Amount | None):
+        return {"currency": value.currency, "minor_units": value.minor_units} if value else None
+
+    @staticmethod
+    def _time(value):
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

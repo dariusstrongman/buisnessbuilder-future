@@ -746,6 +746,14 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
             row = cursor.fetchone()
             return self._job_from_dict(decode(row["body"])) if row else None
 
+    def list_jobs(self, tenant_id: str, company_id: str) -> tuple[Job, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_jobs WHERE tenant_id=%s AND company_id=%s ORDER BY job_id",
+                (tenant_id, company_id),
+            )
+            return tuple(self._job_from_dict(decode(row["body"])) for row in cursor)
+
     def save_approval(self, approval: ApprovalRecord) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -785,6 +793,24 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
         data["state"] = ApprovalState(data["state"])
         return ApprovalRecord(**data)
 
+    def list_approvals(
+        self, tenant_id: str, company_id: str
+    ) -> tuple[ApprovalRecord, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_approvals WHERE tenant_id=%s AND company_id=%s ORDER BY approval_id",
+                (tenant_id, company_id),
+            )
+            rows = tuple(cursor)
+        from businessbuilder.runtime.models import ApprovalMode, ApprovalState
+        values: list[ApprovalRecord] = []
+        for row in rows:
+            data = decode(row["body"])
+            data["mode"] = ApprovalMode(data["mode"])
+            data["state"] = ApprovalState(data["state"])
+            values.append(ApprovalRecord(**data))
+        return tuple(values)
+
     def save_budget(self, budget: Budget) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -815,6 +841,21 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
         data = decode(row["body"])
         data["ceiling"] = Money(**data["ceiling"])
         return Budget(**data)
+
+    def list_budgets(self, tenant_id: str, company_id: str) -> tuple[Budget, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_budgets WHERE tenant_id=%s AND company_id=%s ORDER BY budget_id",
+                (tenant_id, company_id),
+            )
+            rows = tuple(cursor)
+        from businessbuilder.runtime.models import Money
+        values: list[Budget] = []
+        for row in rows:
+            data = decode(row["body"])
+            data["ceiling"] = Money(**data["ceiling"])
+            values.append(Budget(**data))
+        return tuple(values)
 
     def save_reservation(
         self,

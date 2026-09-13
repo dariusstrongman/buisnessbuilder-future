@@ -91,6 +91,9 @@ class CommercialRepository(ABC):
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order: ...
 
     @abstractmethod
+    def list_current_orders(self, tenant_id: str, company_id: str) -> tuple[Order, ...]: ...
+
+    @abstractmethod
     def order_history(self, tenant_id: str, company_id: str, order_id: str) -> tuple[Order, ...]: ...
 
     @abstractmethod
@@ -386,6 +389,14 @@ class InMemoryCommercialRepository(CommercialRepository):
         if not history:
             raise CommercialNotFound("order not found in scope")
         return history[-1]
+
+    def list_current_orders(self, tenant_id: str, company_id: str) -> tuple[Order, ...]:
+        with self.lock:
+            return tuple(
+                history[-1]
+                for (tenant, company, _), history in self.orders.items()
+                if tenant == tenant_id and company == company_id
+            )
 
     def order_history(self, tenant_id: str, company_id: str, order_id: str) -> tuple[Order, ...]:
         return tuple(self.orders.get((tenant_id, company_id, order_id), ()))

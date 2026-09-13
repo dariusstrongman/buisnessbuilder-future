@@ -8,8 +8,11 @@ import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+import re
+from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
+from businessbuilder.customer_api.bootstrap import create_postgres_customer_api
 from businessbuilder.postgres.cloud_proof import get_cloud_proof, run_cloud_proof
 from businessbuilder.postgres.connection import connect_postgres
 from businessbuilder.postgres.migrations import migrate
@@ -29,6 +32,7 @@ PUBLIC_ASSETS = {
     "/styles.css": "/styles.css",
 }
 PROOF_ENVIRONMENTS = frozenset({"development", "local", "test"})
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def _proof_endpoints_enabled() -> bool:
@@ -78,12 +82,15 @@ class StagingHandler(SimpleHTTPRequestHandler):
         body: dict[str, object],
         *,
         send_body: bool = True,
+        headers: dict[str, str] | None = None,
     ) -> None:
         payload = json.dumps(body, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if send_body:
             self.wfile.write(payload)
@@ -220,6 +227,9 @@ class StagingHandler(SimpleHTTPRequestHandler):
                 send_body=send_body,
             )
             return
+        if path.startswith("/api/v1/"):
+            self._serve_customer_api("GET", send_body=send_body)
+            return
         asset_path = PUBLIC_ASSETS.get(path)
         if asset_path is None:
             self._json(
@@ -243,16 +253,27 @@ class StagingHandler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler API
         if not self._request_envelope_allowed():
             return
+        path = urlsplit(self.path).path
+        application = getattr(self.server, "customer_api", None)
+        api_methods = application.allowed_methods(path) if application and path.startswith("/api/v1/") else ()
+        if path.startswith("/api/v1/") and application and not api_methods:
+            self._json(HTTPStatus.NOT_FOUND, {"status": "not_found"}, send_body=False)
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        allow = self._allow_header(api_methods) if api_methods else "GET, HEAD, OPTIONS"
+        self.send_header("Allow", allow)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _method_not_allowed(self) -> None:
         if not self._request_envelope_allowed():
             return
+        path = urlsplit(self.path).path
+        application = getattr(self.server, "customer_api", None)
+        api_methods = application.allowed_methods(path) if application and path.startswith("/api/v1/") else ()
         self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        allow = self._allow_header(api_methods) if api_methods else "GET, HEAD, OPTIONS"
+        self.send_header("Allow", allow)
         self.send_header("Content-Type", "application/json")
         payload = b'{"error":"method not allowed","status":"error"}'
         self.send_header("Content-Length", str(len(payload)))
@@ -260,7 +281,96 @@ class StagingHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    do_POST = _method_not_allowed
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._request_envelope_allowed():
+            return
+        path = urlsplit(self.path).path
+        if not path.startswith("/api/v1/"):
+            self._method_not_allowed()
+            return
+        self._serve_customer_api("POST", send_body=True)
+
+    def _serve_customer_api(self, method: str, *, send_body: bool) -> None:
+        application = getattr(self.server, "customer_api", None)
+        request_id = self._trusted_request_id(self.headers.get("X-Request-ID"))
+        correlation_id = self._trusted_request_id(
+            self.headers.get("X-Correlation-ID"), fallback=request_id
+        )
+        response_headers = {
+            "X-Request-ID": request_id,
+            "X-Correlation-ID": correlation_id,
+        }
+        if application is None:
+            self._json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"status": "error", "error": "service_unavailable"},
+                send_body=send_body,
+                headers=response_headers,
+            )
+            return
+        try:
+            body = None
+            if method == "POST":
+                content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                if content_type != "application/json":
+                    self._json(
+                        HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                        {"status": "error", "error": "application_json_required"},
+                        headers=response_headers,
+                    )
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw) if raw else {}
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"status": "error", "error": "invalid_json"},
+                        headers=response_headers,
+                    )
+                    return
+            parsed = urlsplit(self.path)
+            response = application.handle(
+                method=method,
+                path=parsed.path,
+                headers={key: value for key, value in self.headers.items()},
+                query=parse_qs(parsed.query, keep_blank_values=True),
+                body=body,
+                request_id=request_id,
+                correlation_id=correlation_id,
+            )
+            if response.status is HTTPStatus.METHOD_NOT_ALLOWED:
+                response_headers["Allow"] = self._allow_header(response.allow)
+            self._json(
+                response.status,
+                response.body,
+                send_body=send_body,
+                headers=response_headers,
+            )
+        except Exception:
+            self.log_error("customer API request failed")
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"status": "error", "error": "request_failed"},
+                send_body=send_body,
+                headers=response_headers,
+            )
+
+    @staticmethod
+    def _trusted_request_id(value: str | None, *, fallback: str | None = None) -> str:
+        if value and REQUEST_ID_PATTERN.fullmatch(value):
+            return value
+        return fallback or f"req_{uuid4().hex}"
+
+    @staticmethod
+    def _allow_header(methods: tuple[str, ...]) -> str:
+        expanded = list(methods)
+        if "GET" in expanded:
+            expanded.insert(expanded.index("GET") + 1, "HEAD")
+        expanded.append("OPTIONS")
+        return ", ".join(expanded)
+
     do_PUT = _method_not_allowed
     do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed
@@ -301,7 +411,11 @@ class StagingHandler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     _initialize_database()
+    signing_key = os.environ.get("CUSTOMER_API_PRINCIPAL_KEY", "").encode()
+    if len(signing_key) < 32:
+        raise RuntimeError("CUSTOMER_API_PRINCIPAL_KEY must contain at least 32 bytes")
     port = int(os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), StagingHandler)
+    server.customer_api = create_postgres_customer_api(signing_key=signing_key)
     print(f"Business Builder staging listening on :{port}", flush=True)
     server.serve_forever()

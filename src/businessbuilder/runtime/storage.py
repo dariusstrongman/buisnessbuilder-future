@@ -53,16 +53,25 @@ class RuntimeRepository(ABC):
     def get_job_by_idempotency(self, tenant_id: str, company_id: str, key: str) -> Job | None: ...
 
     @abstractmethod
+    def list_jobs(self, tenant_id: str, company_id: str) -> tuple[Job, ...]: ...
+
+    @abstractmethod
     def save_approval(self, approval: ApprovalRecord) -> None: ...
 
     @abstractmethod
     def get_approval(self, tenant_id: str, company_id: str, approval_id: str) -> ApprovalRecord | None: ...
 
     @abstractmethod
+    def list_approvals(self, tenant_id: str, company_id: str) -> tuple[ApprovalRecord, ...]: ...
+
+    @abstractmethod
     def save_budget(self, budget: Budget) -> None: ...
 
     @abstractmethod
     def get_budget(self, tenant_id: str, company_id: str, budget_id: str) -> Budget | None: ...
+
+    @abstractmethod
+    def list_budgets(self, tenant_id: str, company_id: str) -> tuple[Budget, ...]: ...
 
     @abstractmethod
     def save_reservation(
@@ -219,6 +228,13 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         ).fetchone()
         return self._job_from_dict(decode(row["body"])) if row else None
 
+    def list_jobs(self, tenant_id: str, company_id: str) -> tuple[Job, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM jobs WHERE tenant_id=? AND company_id=? ORDER BY job_id",
+            (tenant_id, company_id),
+        ).fetchall()
+        return tuple(self._job_from_dict(decode(row["body"])) for row in rows)
+
     def _job_from_dict(self, data: dict[str, Any]) -> Job:
         from .models import ApprovalMode, ArtifactRef, CapabilityFailure, FailureKind, JobStatus, Money, RetryPolicy
 
@@ -255,6 +271,20 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         data["state"] = ApprovalState(data["state"])
         return ApprovalRecord(**data)
 
+    def list_approvals(self, tenant_id: str, company_id: str) -> tuple[ApprovalRecord, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM approvals WHERE tenant_id=? AND company_id=? ORDER BY rowid",
+            (tenant_id, company_id),
+        ).fetchall()
+        values: list[ApprovalRecord] = []
+        for row in rows:
+            from .models import ApprovalMode, ApprovalState
+            data = decode(row["body"])
+            data["mode"] = ApprovalMode(data["mode"])
+            data["state"] = ApprovalState(data["state"])
+            values.append(ApprovalRecord(**data))
+        return tuple(values)
+
     def save_budget(self, budget: Budget) -> None:
         with self.connection:
             self.connection.execute(
@@ -274,6 +304,19 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         data = decode(row["body"])
         data["ceiling"] = Money(**data["ceiling"])
         return Budget(**data)
+
+    def list_budgets(self, tenant_id: str, company_id: str) -> tuple[Budget, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM budgets WHERE tenant_id=? AND company_id=? ORDER BY budget_id",
+            (tenant_id, company_id),
+        ).fetchall()
+        from .models import Money
+        values: list[Budget] = []
+        for row in rows:
+            data = decode(row["body"])
+            data["ceiling"] = Money(**data["ceiling"])
+            values.append(Budget(**data))
+        return tuple(values)
 
     def save_reservation(
         self, job: Job, budget_id: str, currency: str, reserved_minor: int, settled_minor: int, state: str

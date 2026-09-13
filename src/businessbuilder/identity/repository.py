@@ -78,6 +78,9 @@ class IdentityRepository(ABC):
     def list_memberships(self, tenant_id: str) -> tuple[Membership, ...]: ...
 
     @abstractmethod
+    def list_user_memberships(self, user_id: str) -> tuple[Membership, ...]: ...
+
+    @abstractmethod
     def save_session(self, session: Session) -> None: ...
 
     @abstractmethod
@@ -256,6 +259,9 @@ class InMemoryIdentityRepository(IdentityRepository):
 
     def list_memberships(self, tenant_id: str) -> tuple[Membership, ...]:
         return tuple(item for item in self.memberships.values() if item.tenant_id == tenant_id)
+
+    def list_user_memberships(self, user_id: str) -> tuple[Membership, ...]:
+        return tuple(item for item in self.memberships.values() if item.user_id == user_id)
 
     def save_session(self, session: Session) -> None:
         with self._lock:

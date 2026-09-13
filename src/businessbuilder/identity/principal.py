@@ -13,8 +13,10 @@ from .models import (
     MembershipStatus,
     OrganizationStatus,
     Role,
+    Session,
     TenantStatus,
     UserStatus,
+    User,
 )
 from .repository import IdentityRepository
 
@@ -62,9 +64,7 @@ class PrincipalContextAuthority:
         support_impersonation_session_id: str | None = None,
     ) -> AuthenticatedPrincipal:
         now = self.clock()
-        session = self.repository.get_session_by_digest(_digest(raw_session_token))
-        if session is None or not session.active_at(now):
-            raise AuthorizationDenied("active authenticated session required")
+        session, _ = self._active_session(raw_session_token, now)
         identity = self._derive(
             session.user_id,
             tenant_id,
@@ -94,6 +94,11 @@ class PrincipalContextAuthority:
         unsigned["principal_id"] = principal_id
         signature = self._signature(unsigned)
         return AuthenticatedPrincipal(**unsigned, signature=signature)
+
+    def authenticate_session(self, raw_session_token: str) -> User:
+        """Validate an opaque bearer token without selecting client-owned scope."""
+        _, user = self._active_session(raw_session_token, self.clock())
+        return user
 
     def verify(
         self,
@@ -190,6 +195,19 @@ class PrincipalContextAuthority:
             "role": membership.role,
             "support_ends_at": support_ends_at,
         }
+
+    def _active_session(
+        self, raw_session_token: str, at: datetime
+    ) -> tuple[Session, User]:
+        if not isinstance(raw_session_token, str) or not raw_session_token:
+            raise AuthorizationDenied("active authenticated session required")
+        session = self.repository.get_session_by_digest(_digest(raw_session_token))
+        if session is None or not session.active_at(at):
+            raise AuthorizationDenied("active authenticated session required")
+        user = self.repository.get_user(session.user_id)
+        if user.status is not UserStatus.ACTIVE:
+            raise AuthorizationDenied("deactivated user")
+        return session, user
 
     def _signature(self, unsigned: dict[str, object]) -> str:
         digest = hmac.new(
