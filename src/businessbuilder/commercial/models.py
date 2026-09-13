@@ -59,6 +59,12 @@ class SubscriptionStatus(StrEnum):
     SUSPENDED = "suspended"
 
 
+class OutboxStatus(StrEnum):
+    PENDING = "pending"
+    DISPATCHING = "dispatching"
+    ACKNOWLEDGED = "acknowledged"
+
+
 class RenewalState(StrEnum):
     WILL_RENEW = "will_renew"
     WILL_CANCEL = "will_cancel"
@@ -351,6 +357,21 @@ class CommercialEvent:
             "causation_id": self.causation_id,
             "payload": self.payload,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxMessage:
+    outbox_id: str
+    idempotency_key: str
+    event: CommercialEvent
+    status: OutboxStatus
+    attempts: int
+    available_at: datetime
+    created_at: datetime
+    claimed_by: str | None = None
+    claimed_until: datetime | None = None
+    acknowledged_at: datetime | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

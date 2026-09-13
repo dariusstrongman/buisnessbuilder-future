@@ -8,12 +8,13 @@ from .models import (
     NormalizedBillingEvent, Order, OrderAuditEvent, OrderItem, OrderStatus, Package,
     PaymentIntentRef, Product, ProductCode, ProductVersion, RefundKind, RefundRecord,
     RenewalState, Subscription, SubscriptionAuditEvent, SubscriptionPlanRef,
-    SubscriptionStatus,
+    SubscriptionStatus, OutboxMessage, OutboxStatus,
 )
 from .ports import (
     BillingProvider, CheckoutProvider, CommercialEventSink, InvoiceProvider,
     RecordingCommercialEventSink, RefundProvider, SubscriptionProvider,
 )
+from .outbox import CommercialOutboxDispatcher
 from .repository import CommercialConflict, CommercialNotFound, CommercialRepository, InMemoryCommercialRepository, SQLiteCommercialRepository
 from .service import CommercialService, SUPPORTED_BILLING_EVENTS
 from .webhooks import BillingEventTranslator, FixtureBillingEventTranslator
@@ -22,11 +23,13 @@ __all__ = [
     "Amount", "BillingEventTranslator", "BillingMode", "BillingPeriod", "BillingProvider",
     "CancellationPolicy", "CancellationRecord", "CancellationTiming", "CheckoutIntent",
     "CheckoutProvider", "CheckoutStatus", "CommercialConflict", "CommercialEvent",
-    "CommercialEventSink", "CommercialNotFound", "CommercialRepository", "CommercialService",
+    "CommercialEventSink", "CommercialNotFound", "CommercialOutboxDispatcher",
+    "CommercialRepository", "CommercialService",
     "DISPLAY_NAMES", "Entitlement", "EntitlementClass", "EntitlementGrant",
     "EntitlementStatus", "FEATURES", "Feature", "FixtureBillingEventTranslator", "GracePeriod",
     "InMemoryCommercialRepository", "SQLiteCommercialRepository", "InvoiceProvider", "NormalizedBillingEvent", "Order",
-    "OrderAuditEvent", "OrderItem", "OrderStatus", "PACKAGE_FEATURES", "Package",
+    "OrderAuditEvent", "OrderItem", "OrderStatus", "OutboxMessage", "OutboxStatus",
+    "PACKAGE_FEATURES", "Package",
     "PaymentIntentRef", "Product", "ProductCode", "ProductVersion", "RecordingCommercialEventSink",
     "RefundKind", "RefundProvider", "RefundRecord", "RenewalState", "SUPPORTED_BILLING_EVENTS",
     "Subscription", "SubscriptionAuditEvent", "SubscriptionPlanRef", "SubscriptionProvider",

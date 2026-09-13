@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+from hashlib import sha256
 import json
 from threading import RLock
 from typing import Any, Iterator, Sequence
@@ -12,9 +14,12 @@ from businessbuilder._serialization import decode_record, encode_record
 from businessbuilder.commercial.models import (
     CancellationRecord,
     CheckoutIntent,
+    CommercialEvent,
     EntitlementGrant,
     Order,
     OrderAuditEvent,
+    OutboxMessage,
+    OutboxStatus,
     PaymentIntentRef,
     Product,
     ProductVersion,
@@ -499,6 +504,156 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                 """,
                 (provider, provider_event_ref),
             )
+
+    @staticmethod
+    def _outbox_from_row(row: dict[str, Any]) -> OutboxMessage:
+        return OutboxMessage(
+            outbox_id=row["outbox_id"],
+            idempotency_key=row["idempotency_key"],
+            event=decode_record(row["body"], _COMMERCIAL_TYPES),
+            status=OutboxStatus(row["state"]),
+            attempts=row["attempts"],
+            available_at=row["available_at"],
+            created_at=row["created_at"],
+            claimed_by=row["claimed_by"],
+            claimed_until=row["claimed_until"],
+            acknowledged_at=row["acknowledged_at"],
+            last_error=row["last_error"],
+        )
+
+    def enqueue_outbox(
+        self, event: CommercialEvent, idempotency_key: str
+    ) -> OutboxMessage:
+        if not idempotency_key:
+            raise ValueError("outbox idempotency_key is required")
+        outbox_id = "outbox_" + sha256(idempotency_key.encode()).hexdigest()[:24]
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO bb_commercial_outbox(
+                    outbox_id, idempotency_key, tenant_id, company_id,
+                    event_type, body, state, attempts, available_at, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, %s, %s)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    outbox_id,
+                    idempotency_key,
+                    event.tenant_id,
+                    event.company_id,
+                    event.event_type,
+                    encode_record(event),
+                    event.occurred_at,
+                    event.occurred_at,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute(
+                    """
+                    SELECT * FROM bb_commercial_outbox
+                    WHERE idempotency_key=%s
+                    """,
+                    (idempotency_key,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise CommercialConflict("outbox enqueue did not persist")
+        message = self._outbox_from_row(row)
+        if message.event != event:
+            raise CommercialConflict(
+                "outbox idempotency key cannot identify different events"
+            )
+        return message
+
+    def claim_outbox(
+        self,
+        dispatcher_id: str,
+        *,
+        at: datetime,
+        lease: timedelta,
+        limit: int,
+    ) -> tuple[OutboxMessage, ...]:
+        if not dispatcher_id or lease <= timedelta(0) or limit < 1:
+            raise ValueError("dispatcher, positive lease, and positive limit required")
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH candidates AS (
+                        SELECT outbox_id
+                        FROM bb_commercial_outbox
+                        WHERE (
+                            state='pending' AND available_at <= %s
+                        ) OR (
+                            state='dispatching' AND claimed_until <= %s
+                        )
+                        ORDER BY sequence
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
+                    )
+                    UPDATE bb_commercial_outbox AS message
+                    SET state='dispatching',
+                        attempts=message.attempts + 1,
+                        claimed_by=%s,
+                        claimed_until=%s,
+                        last_error=NULL
+                    FROM candidates
+                    WHERE message.outbox_id=candidates.outbox_id
+                    RETURNING message.*
+                    """,
+                    (at, at, limit, dispatcher_id, at + lease),
+                )
+                return tuple(self._outbox_from_row(row) for row in cursor)
+
+    def acknowledge_outbox(
+        self, outbox_id: str, dispatcher_id: str, *, at: datetime
+    ) -> OutboxMessage:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE bb_commercial_outbox
+                SET state='acknowledged', claimed_by=NULL, claimed_until=NULL,
+                    acknowledged_at=%s
+                WHERE outbox_id=%s AND state='dispatching' AND claimed_by=%s
+                RETURNING *
+                """,
+                (at, outbox_id, dispatcher_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise CommercialConflict("outbox acknowledgment claim mismatch")
+        return self._outbox_from_row(row)
+
+    def release_outbox(
+        self,
+        outbox_id: str,
+        dispatcher_id: str,
+        *,
+        retry_at: datetime,
+        error: str,
+    ) -> OutboxMessage:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE bb_commercial_outbox
+                SET state='pending', available_at=%s, claimed_by=NULL,
+                    claimed_until=NULL, last_error=%s
+                WHERE outbox_id=%s AND state='dispatching' AND claimed_by=%s
+                RETURNING *
+                """,
+                (retry_at, error[:200], outbox_id, dispatcher_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise CommercialConflict("outbox release claim mismatch")
+        return self._outbox_from_row(row)
+
+    def list_outbox(self) -> tuple[OutboxMessage, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM bb_commercial_outbox ORDER BY sequence")
+            return tuple(self._outbox_from_row(row) for row in cursor)
 
 
 class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):

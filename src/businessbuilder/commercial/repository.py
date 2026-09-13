@@ -3,6 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
+from datetime import datetime, timedelta
+from hashlib import sha256
 import sqlite3
 from threading import RLock
 from typing import Iterator
@@ -12,9 +15,12 @@ from businessbuilder._serialization import decode_record, encode_record
 from .models import (
     CancellationRecord,
     CheckoutIntent,
+    CommercialEvent,
     EntitlementGrant,
     Order,
     OrderAuditEvent,
+    OutboxMessage,
+    OutboxStatus,
     PaymentIntentRef,
     Product,
     ProductVersion,
@@ -40,6 +46,37 @@ class CommercialRepository(ABC):
     def billing_event_transaction(
         self, provider: str, provider_event_ref: str
     ) -> Iterator[bool]: ...
+
+    @abstractmethod
+    def enqueue_outbox(self, event, idempotency_key: str) -> OutboxMessage: ...
+
+    @abstractmethod
+    def claim_outbox(
+        self,
+        dispatcher_id: str,
+        *,
+        at: datetime,
+        lease: timedelta,
+        limit: int,
+    ) -> tuple[OutboxMessage, ...]: ...
+
+    @abstractmethod
+    def acknowledge_outbox(
+        self, outbox_id: str, dispatcher_id: str, *, at: datetime
+    ) -> OutboxMessage: ...
+
+    @abstractmethod
+    def release_outbox(
+        self,
+        outbox_id: str,
+        dispatcher_id: str,
+        *,
+        retry_at: datetime,
+        error: str,
+    ) -> OutboxMessage: ...
+
+    @abstractmethod
+    def list_outbox(self) -> tuple[OutboxMessage, ...]: ...
 
     @abstractmethod
     def save_product(self, product: Product, version: ProductVersion) -> None: ...
@@ -137,6 +174,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.entitlement_grants: dict[tuple[str, str, str], list[EntitlementGrant]] = {}
         self.audit: list[object] = []
         self.processed_events: set[tuple[str, str]] = set()
+        self.outbox: dict[str, OutboxMessage] = {}
+        self.outbox_order: list[str] = []
 
     _STATE_FIELDS = (
         "products",
@@ -150,6 +189,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         "entitlement_grants",
         "audit",
         "processed_events",
+        "outbox",
+        "outbox_order",
     )
 
     def _snapshot_state(self) -> dict[str, object]:
@@ -189,6 +230,133 @@ class InMemoryCommercialRepository(CommercialRepository):
                 return
             yield True
             self.mark_billing_event_processed(provider, provider_event_ref)
+
+    def enqueue_outbox(self, event, idempotency_key: str) -> OutboxMessage:
+        if not idempotency_key:
+            raise ValueError("outbox idempotency_key is required")
+        with self.lock:
+            existing = next(
+                (
+                    item
+                    for item in self.outbox.values()
+                    if item.idempotency_key == idempotency_key
+                ),
+                None,
+            )
+            if existing:
+                if existing.event != event:
+                    raise CommercialConflict(
+                        "outbox idempotency key cannot identify different events"
+                    )
+                return existing
+            outbox_id = "outbox_" + sha256(idempotency_key.encode()).hexdigest()[:24]
+            message = OutboxMessage(
+                outbox_id,
+                idempotency_key,
+                event,
+                OutboxStatus.PENDING,
+                0,
+                event.occurred_at,
+                event.occurred_at,
+            )
+            self.outbox[outbox_id] = message
+            self.outbox_order.append(outbox_id)
+            return message
+
+    def claim_outbox(
+        self,
+        dispatcher_id: str,
+        *,
+        at: datetime,
+        lease: timedelta,
+        limit: int,
+    ) -> tuple[OutboxMessage, ...]:
+        if not dispatcher_id or lease <= timedelta(0) or limit < 1:
+            raise ValueError("dispatcher, positive lease, and positive limit required")
+        claimed: list[OutboxMessage] = []
+        with self.lock:
+            for outbox_id in self.outbox_order:
+                message = self.outbox[outbox_id]
+                available = (
+                    message.status is OutboxStatus.PENDING
+                    and message.available_at <= at
+                )
+                abandoned = (
+                    message.status is OutboxStatus.DISPATCHING
+                    and message.claimed_until is not None
+                    and message.claimed_until <= at
+                )
+                if not (available or abandoned):
+                    continue
+                changed = replace(
+                    message,
+                    status=OutboxStatus.DISPATCHING,
+                    attempts=message.attempts + 1,
+                    claimed_by=dispatcher_id,
+                    claimed_until=at + lease,
+                    last_error=None,
+                )
+                self.outbox[outbox_id] = changed
+                claimed.append(changed)
+                if len(claimed) == limit:
+                    break
+        return tuple(claimed)
+
+    def acknowledge_outbox(
+        self, outbox_id: str, dispatcher_id: str, *, at: datetime
+    ) -> OutboxMessage:
+        with self.lock:
+            message = self.outbox.get(outbox_id)
+            if message is None:
+                raise CommercialNotFound("outbox message not found")
+            if message.status is OutboxStatus.ACKNOWLEDGED:
+                return message
+            if (
+                message.status is not OutboxStatus.DISPATCHING
+                or message.claimed_by != dispatcher_id
+            ):
+                raise CommercialConflict("outbox acknowledgment claim mismatch")
+            changed = replace(
+                message,
+                status=OutboxStatus.ACKNOWLEDGED,
+                claimed_by=None,
+                claimed_until=None,
+                acknowledged_at=at,
+            )
+            self.outbox[outbox_id] = changed
+            return changed
+
+    def release_outbox(
+        self,
+        outbox_id: str,
+        dispatcher_id: str,
+        *,
+        retry_at: datetime,
+        error: str,
+    ) -> OutboxMessage:
+        with self.lock:
+            message = self.outbox.get(outbox_id)
+            if message is None:
+                raise CommercialNotFound("outbox message not found")
+            if (
+                message.status is not OutboxStatus.DISPATCHING
+                or message.claimed_by != dispatcher_id
+            ):
+                raise CommercialConflict("outbox release claim mismatch")
+            changed = replace(
+                message,
+                status=OutboxStatus.PENDING,
+                available_at=retry_at,
+                claimed_by=None,
+                claimed_until=None,
+                last_error=error[:200],
+            )
+            self.outbox[outbox_id] = changed
+            return changed
+
+    def list_outbox(self) -> tuple[OutboxMessage, ...]:
+        with self.lock:
+            return tuple(self.outbox[item] for item in self.outbox_order)
 
     def save_product(self, product: Product, version: ProductVersion) -> None:
         with self.lock:
@@ -340,7 +508,8 @@ _COMMERCIAL_TYPES = {
         SubscriptionAuditEvent, Amount, BillingPeriod, GracePeriod,
         CancellationPolicy, ProductCode, BillingMode, EntitlementClass,
         EntitlementStatus, OrderStatus, CheckoutStatus, SubscriptionStatus,
-        RenewalState, RefundKind, CancellationTiming,
+        RenewalState, RefundKind, CancellationTiming, CommercialEvent,
+        OutboxMessage, OutboxStatus,
     )
 }
 
@@ -370,6 +539,12 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
             CREATE TABLE IF NOT EXISTS processed_billing_events (
                 provider TEXT NOT NULL, provider_event_ref TEXT NOT NULL,
                 PRIMARY KEY(provider, provider_event_ref)
+            );
+            CREATE TABLE IF NOT EXISTS commercial_outbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                outbox_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                body TEXT NOT NULL
             );
             """
         )
@@ -436,6 +611,79 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
         for (body,) in self.connection.execute("SELECT body FROM commercial_audit_events ORDER BY rowid"):
             self.audit.append(decode_record(body, _COMMERCIAL_TYPES))
         self.processed_events.update(self.connection.execute("SELECT provider, provider_event_ref FROM processed_billing_events"))
+        for outbox_id, body in self.connection.execute(
+            "SELECT outbox_id, body FROM commercial_outbox ORDER BY sequence"
+        ):
+            self.outbox[outbox_id] = decode_record(body, _COMMERCIAL_TYPES)
+            self.outbox_order.append(outbox_id)
+
+    def _save_outbox(self, message: OutboxMessage) -> None:
+        statement = """
+            INSERT INTO commercial_outbox(outbox_id, idempotency_key, body)
+            VALUES (?, ?, ?)
+            ON CONFLICT(outbox_id) DO UPDATE SET body=excluded.body
+        """
+        parameters = (
+            message.outbox_id,
+            message.idempotency_key,
+            encode_record(message),
+        )
+        if self._transaction_depth:
+            self.connection.execute(statement, parameters)
+        else:
+            with self.connection:
+                self.connection.execute(statement, parameters)
+
+    def enqueue_outbox(
+        self, event: CommercialEvent, idempotency_key: str
+    ) -> OutboxMessage:
+        message = super().enqueue_outbox(event, idempotency_key)
+        self._save_outbox(message)
+        return message
+
+    def claim_outbox(
+        self,
+        dispatcher_id: str,
+        *,
+        at: datetime,
+        lease: timedelta,
+        limit: int,
+    ) -> tuple[OutboxMessage, ...]:
+        with self.transaction():
+            messages = super().claim_outbox(
+                dispatcher_id, at=at, lease=lease, limit=limit
+            )
+            for message in messages:
+                self._save_outbox(message)
+            return messages
+
+    def acknowledge_outbox(
+        self, outbox_id: str, dispatcher_id: str, *, at: datetime
+    ) -> OutboxMessage:
+        with self.transaction():
+            message = super().acknowledge_outbox(
+                outbox_id, dispatcher_id, at=at
+            )
+            self._save_outbox(message)
+            return message
+
+    def release_outbox(
+        self,
+        outbox_id: str,
+        dispatcher_id: str,
+        *,
+        retry_at: datetime,
+        error: str,
+    ) -> OutboxMessage:
+        with self.transaction():
+            message = super().release_outbox(
+                outbox_id,
+                dispatcher_id,
+                retry_at=retry_at,
+                error=error,
+            )
+            self._save_outbox(message)
+            return message
 
     def save_product(self, product: Product, version: ProductVersion) -> None:
         super().save_product(product, version)

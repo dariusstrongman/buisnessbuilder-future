@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 1
+MIGRATION_VERSION = 2
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -56,6 +56,25 @@ CREATE TABLE IF NOT EXISTS bb_processed_billing_events (
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (provider, provider_event_ref)
 );
+CREATE TABLE IF NOT EXISTS bb_commercial_outbox (
+    sequence BIGSERIAL UNIQUE,
+    outbox_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    body TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'dispatching', 'acknowledged')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    available_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    claimed_by TEXT,
+    claimed_until TIMESTAMPTZ,
+    acknowledged_at TIMESTAMPTZ,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS bb_commercial_outbox_dispatch
+    ON bb_commercial_outbox (state, available_at, sequence);
 
 CREATE TABLE IF NOT EXISTS bb_runtime_events (
     sequence BIGSERIAL UNIQUE,

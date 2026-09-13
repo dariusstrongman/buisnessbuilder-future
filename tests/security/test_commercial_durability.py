@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
 
 from businessbuilder.commercial import (
     Amount,
+    CommercialOutboxDispatcher,
     CommercialService,
     InMemoryCommercialRepository,
     NormalizedBillingEvent,
     OrderStatus,
+    OutboxStatus,
     ProductCode,
     RecordingCommercialEventSink,
     SQLiteCommercialRepository,
@@ -31,6 +33,30 @@ NOW = datetime(2026, 9, 13, 20, 0, tzinfo=timezone.utc)
 class FailingEventSink:
     def publish(self, event) -> None:
         raise RuntimeError("simulated downstream failure")
+
+
+class FailingEnqueueRepository(InMemoryCommercialRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_enqueue = False
+
+    def enqueue_outbox(self, event, idempotency_key):
+        message = super().enqueue_outbox(event, idempotency_key)
+        if self.fail_enqueue:
+            raise RuntimeError("simulated transaction failure")
+        return message
+
+
+class FailingSQLiteEnqueueRepository(SQLiteCommercialRepository):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.fail_enqueue = False
+
+    def enqueue_outbox(self, event, idempotency_key):
+        message = super().enqueue_outbox(event, idempotency_key)
+        if self.fail_enqueue:
+            raise RuntimeError("simulated transaction failure")
+        return message
 
 
 class CommercialDurabilityTests(unittest.TestCase):
@@ -125,7 +151,7 @@ class CommercialDurabilityTests(unittest.TestCase):
             ),
         )
 
-    def test_failed_in_memory_event_rolls_back_and_can_retry(self) -> None:
+    def test_failed_in_memory_delivery_commits_and_can_retry(self) -> None:
         repository = InMemoryCommercialRepository()
         seed_default_catalog(repository, effective_at=NOW)
         setup_service = self.service(repository, RecordingCommercialEventSink())
@@ -135,14 +161,19 @@ class CommercialDurabilityTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.service(repository, FailingEventSink()).handle_billing_event(event)
 
-        self.assert_rolled_back(repository, order, event)
-        self.assertTrue(
-            self.service(repository, RecordingCommercialEventSink()).handle_billing_event(
-                event
-            )
+        self.assert_committed_pending_delivery(repository, order, event)
+        sink = RecordingCommercialEventSink()
+        dispatcher = CommercialOutboxDispatcher(
+            repository,
+            sink,
+            dispatcher_id="retry-worker",
+            clock=lambda: NOW + timedelta(seconds=2),
         )
+        self.assertGreater(dispatcher.dispatch_pending(), 0)
+        self.assertTrue(all(item.status is OutboxStatus.ACKNOWLEDGED for item in repository.list_outbox()))
+        self.assertEqual(1, sum(item.event_type == "commercial.fulfillment.eligible" for item in sink.events))
 
-    def test_failed_sqlite_event_rolls_back_on_disk_and_can_retry(self) -> None:
+    def test_failed_sqlite_delivery_commits_on_disk_and_can_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = str(Path(temporary) / "commercial.sqlite")
             repository = SQLiteCommercialRepository(path)
@@ -153,17 +184,64 @@ class CommercialDurabilityTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 self.service(repository, FailingEventSink()).handle_billing_event(event)
+            self.assert_committed_pending_delivery(repository, order, event)
+            repository.close()
+
+            reopened = SQLiteCommercialRepository(path)
+            self.assert_committed_pending_delivery(reopened, order, event)
+            sink = RecordingCommercialEventSink()
+            dispatcher = CommercialOutboxDispatcher(
+                reopened,
+                sink,
+                dispatcher_id="restart-worker",
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
+            self.assertGreater(dispatcher.dispatch_pending(), 0)
+            self.assertTrue(all(item.status is OutboxStatus.ACKNOWLEDGED for item in reopened.list_outbox()))
+            reopened.close()
+
+    def test_transaction_rollback_never_leaves_in_memory_outbox_event(self) -> None:
+        repository = FailingEnqueueRepository()
+        seed_default_catalog(repository, effective_at=NOW)
+        service = self.service(repository, RecordingCommercialEventSink())
+        order, _ = self.pending_order(repository, service)
+        event = self.payment_event(order)
+        repository.fail_enqueue = True
+
+        with self.assertRaises(RuntimeError):
+            service.handle_billing_event(event)
+
+        self.assert_rolled_back(repository, order, event)
+        self.assertEqual((), repository.list_outbox())
+
+    def test_transaction_rollback_never_leaves_sqlite_outbox_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "commercial.sqlite")
+            repository = FailingSQLiteEnqueueRepository(path)
+            seed_default_catalog(repository, effective_at=NOW)
+            service = self.service(repository, RecordingCommercialEventSink())
+            order, _ = self.pending_order(repository, service)
+            event = self.payment_event(order)
+            repository.fail_enqueue = True
+
+            with self.assertRaises(RuntimeError):
+                service.handle_billing_event(event)
+
             self.assert_rolled_back(repository, order, event)
+            self.assertEqual((), repository.list_outbox())
             repository.close()
 
             reopened = SQLiteCommercialRepository(path)
             self.assert_rolled_back(reopened, order, event)
-            self.assertTrue(
-                self.service(
-                    reopened, RecordingCommercialEventSink()
-                ).handle_billing_event(event)
-            )
+            self.assertEqual((), reopened.list_outbox())
             reopened.close()
+
+    def assert_committed_pending_delivery(self, repository, order, event) -> None:
+        current = repository.get_order(order.tenant_id, order.company_id, order.order_id)
+        self.assertEqual(OrderStatus.FULFILLMENT_PENDING, current.status)
+        self.assertIsNotNone(repository.get_payment_for_order(order.tenant_id, order.company_id, order.order_id))
+        self.assertTrue(repository.billing_event_processed(event.provider, event.provider_event_ref))
+        self.assertTrue(any(item.status is OutboxStatus.PENDING for item in repository.list_outbox()))
 
     def assert_rolled_back(self, repository, order, event) -> None:
         current = repository.get_order(

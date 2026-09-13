@@ -40,6 +40,7 @@ from .models import (
     SUBSCRIPTION_TRANSITIONS,
 )
 from .ports import CommercialEventSink
+from .outbox import CommercialOutboxDispatcher
 from .repository import CommercialConflict, CommercialRepository
 
 
@@ -60,7 +61,10 @@ def _transactional(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self.repository.transaction():
-            return method(self, *args, **kwargs)
+            result = method(self, *args, **kwargs)
+        if self.auto_dispatch_outbox:
+            self.dispatch_pending_events()
+        return result
 
     return wrapped
 
@@ -78,6 +82,8 @@ class CommercialService:
         clock: Callable[[], datetime],
         grace_duration: timedelta = timedelta(days=7),
         automation_restriction_delay: timedelta = timedelta(days=2),
+        auto_dispatch_outbox: bool = True,
+        outbox_dispatcher_id: str = "commercial-inline",
     ) -> None:
         self.repository = repository
         self.authorization = authorization
@@ -86,6 +92,16 @@ class CommercialService:
         self.clock = clock
         self.grace_duration = grace_duration
         self.automation_restriction_delay = automation_restriction_delay
+        self.auto_dispatch_outbox = auto_dispatch_outbox
+        self.outbox = CommercialOutboxDispatcher(
+            repository,
+            events,
+            dispatcher_id=outbox_dispatcher_id,
+            clock=clock,
+        )
+
+    def dispatch_pending_events(self, *, limit: int = 100) -> int:
+        return self.outbox.dispatch_pending(limit=limit)
 
     @_transactional
     def create_order(
@@ -143,28 +159,29 @@ class CommercialService:
             raise ValueError("unsupported normalized billing event")
         if event.raw_payload is not None:
             raise ValueError("raw provider payload must not cross the billing boundary")
+        applied = False
         with self.repository.billing_event_transaction(
             event.provider, event.provider_event_ref
         ) as should_process:
-            if not should_process:
-                return False
-
-            if event.event_type == "billing.checkout.completed":
-                self._checkout_completed(event)
-            elif event.event_type == "billing.payment.succeeded":
-                self._payment_succeeded(event)
-            elif event.event_type == "billing.payment.failed":
-                self._payment_failed(event)
-            elif event.event_type == "billing.subscription.created":
-                self._subscription_created(event)
-            elif event.event_type == "billing.subscription.updated":
-                self._subscription_updated(event)
-            elif event.event_type == "billing.subscription.canceled":
-                self._subscription_canceled(event)
-            elif event.event_type == "billing.refund.created":
-                self._refund_created(event)
-
-            return True
+            if should_process:
+                if event.event_type == "billing.checkout.completed":
+                    self._checkout_completed(event)
+                elif event.event_type == "billing.payment.succeeded":
+                    self._payment_succeeded(event)
+                elif event.event_type == "billing.payment.failed":
+                    self._payment_failed(event)
+                elif event.event_type == "billing.subscription.created":
+                    self._subscription_created(event)
+                elif event.event_type == "billing.subscription.updated":
+                    self._subscription_updated(event)
+                elif event.event_type == "billing.subscription.canceled":
+                    self._subscription_canceled(event)
+                elif event.event_type == "billing.refund.created":
+                    self._refund_created(event)
+                applied = True
+        if self.auto_dispatch_outbox:
+            self.dispatch_pending_events()
+        return applied
 
     @_transactional
     def request_subscription_cancellation(
@@ -541,20 +558,18 @@ class CommercialService:
         )
 
     def _emit(self, event_type: str, subject, actor: str, payload: dict) -> None:
-        self.events.publish(
-            CommercialEvent(
-                self.id_factory("commercial_event"), event_type, subject.tenant_id,
-                subject.user_id, subject.company_id, self.clock(), "businessbuilder.commercial",
-                f"commercial:{getattr(subject, 'order_id', getattr(subject, 'subscription_id', 'event'))}",
-                None, payload,
-            )
+        event = CommercialEvent(
+            self.id_factory("commercial_event"), event_type, subject.tenant_id,
+            subject.user_id, subject.company_id, self.clock(), "businessbuilder.commercial",
+            f"commercial:{getattr(subject, 'order_id', getattr(subject, 'subscription_id', 'event'))}",
+            None, payload,
         )
+        self.repository.enqueue_outbox(event, event.event_id)
 
     def _emit_from_billing(self, event_type: str, event: NormalizedBillingEvent, payload: dict) -> None:
-        self.events.publish(
-            CommercialEvent(
-                self.id_factory("commercial_event"), event_type, event.tenant_id,
-                event.user_id, event.company_id, self.clock(), "businessbuilder.commercial",
-                event.correlation_id, event.event_id, payload,
-            )
+        outgoing = CommercialEvent(
+            self.id_factory("commercial_event"), event_type, event.tenant_id,
+            event.user_id, event.company_id, self.clock(), "businessbuilder.commercial",
+            event.correlation_id, event.event_id, payload,
         )
+        self.repository.enqueue_outbox(outgoing, outgoing.event_id)
