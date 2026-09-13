@@ -1,0 +1,12 @@
+{
+  "containerOverrides": [
+    {
+      "name": "web",
+      "command": [
+        "python",
+        "-c",
+        "import socket; socket.create_connection(('businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com', 5432), 10).close(); print('staging RDS network check passed', flush=True)"
+      ]
+    }
+  ]
+}

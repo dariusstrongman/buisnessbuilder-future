@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v1/commercial-event.schema.json",
+  "title": "Commercial Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "tenant_id", "user_id", "company_id", "occurred_at", "source", "correlation_id", "causation_id", "payload"],
+  "properties": {
+    "schema_version": {"const": "commercial-event.v1"},
+    "event_id": {"$ref": "common.schema.json#/$defs/id"},
+    "event_type": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{2,127}$"},
+    "tenant_id": {"$ref": "common.schema.json#/$defs/id"},
+    "user_id": {"$ref": "common.schema.json#/$defs/id"},
+    "company_id": {"$ref": "common.schema.json#/$defs/id"},
+    "occurred_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "source": {"type": "string", "minLength": 1, "maxLength": 100},
+    "correlation_id": {"$ref": "common.schema.json#/$defs/id"},
+    "causation_id": {"type": ["string", "null"], "maxLength": 128},
+    "payload": {"type": "object"}
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v2/budget-spend.schema.json",
+  "title": "Budget and Spend v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "budget_id",
+    "company_id",
+    "scope_ref",
+    "ceiling",
+    "reserved",
+    "settled",
+    "pass_through",
+    "state",
+    "period_start",
+    "period_end",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "budget-spend.v2"
+    },
+    "budget_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "company_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "scope_ref": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "ceiling": {
+      "$ref": "common.schema.json#/$defs/money"
+    },
+    "reserved": {
+      "$ref": "common.schema.json#/$defs/money"
+    },
+    "settled": {
+      "$ref": "common.schema.json#/$defs/money"
+    },
+    "pass_through": {
+      "$ref": "common.schema.json#/$defs/money"
+    },
+    "state": {
+      "enum": [
+        "proposed",
+        "active",
+        "exhausted",
+        "closed",
+        "revoked"
+      ]
+    },
+    "overage_policy": {
+      "const": "fail_closed"
+    },
+    "period_start": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "period_end": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "approval_ref": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    }
+  }
+}

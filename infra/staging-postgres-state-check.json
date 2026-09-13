@@ -1,0 +1,12 @@
+{
+  "containerOverrides": [
+    {
+      "name": "web",
+      "command": [
+        "python",
+        "-c",
+        "import json; from businessbuilder.postgres.connection import connect_postgres; c=connect_postgres(application_name='businessbuilder-state-check'); names=('bb_identity_records','bb_commercial_records','bb_processed_billing_events','bb_runtime_events','bb_companies','bb_verification_records','bb_cloud_proofs'); counts={}; cur=c.cursor(); [counts.__setitem__(name, (cur.execute('SELECT count(*) AS n FROM '+name), cur.fetchone()['n'])[1]) for name in names]; print(json.dumps(counts, sort_keys=True), flush=True); cur.close(); c.close()"
+      ]
+    }
+  ]
+}

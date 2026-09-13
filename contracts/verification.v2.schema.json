@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.businessbuilder.local/v2/verification.schema.json",
+  "title": "Verification v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "verification_id",
+    "company_id",
+    "target_ref",
+    "state",
+    "method",
+    "evidence_refs",
+    "verified_scope",
+    "retest_on",
+    "criticality",
+    "updated_at",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "verification.v2"
+    },
+    "verification_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "company_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "target_ref": {
+      "$ref": "common.schema.json#/$defs/ref"
+    },
+    "state": {
+      "enum": [
+        "proposed",
+        "executed",
+        "tested",
+        "verified",
+        "failed",
+        "expired"
+      ]
+    },
+    "method": {
+      "enum": [
+        "automated",
+        "human",
+        "founder_only",
+        "external",
+        "automated_plus_human"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/ref"
+      }
+    },
+    "verified_scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "failure_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 100
+    },
+    "expires_at": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retest_on": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      }
+    },
+    "criticality": {
+      "enum": [
+        "critical",
+        "material",
+        "advisory"
+      ]
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    }
+  }
+}

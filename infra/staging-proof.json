@@ -1,0 +1,57 @@
+{
+  "environment": "staging",
+  "generated_at": "2026-09-13T21:05:26Z",
+  "region": "us-east-1",
+  "worker10_commit": "000e8fe500c8a549fc2e56598526adec2b18f220",
+  "worker10_tree": "19ea38c1b2c57f56e85cd07567df38c7b99a2fd5",
+  "source_revision": "6744332880335ba133cb1cf93d6bfd8b4597257f",
+  "image_digest": "sha256:fabc834873d328b0597b32e07fba41add7ee5342fc678460d9a902ece846e685",
+  "task_definition": "businessbuilder-staging:3",
+  "endpoint": "http://18.207.103.233:8080/",
+  "checks": {
+    "bundle_fresh_clone": "passed",
+    "worker10_exact_commit_and_tree": "passed",
+    "combined_test_suite": "222 passed",
+    "postgresql_integration_test": "1 passed",
+    "container_health_with_postgresql": "passed",
+    "prototype_http": "passed",
+    "billy_bob_commercial_cloud_flow": "passed",
+    "duplicate_billing_event_idempotency": "passed",
+    "repository_reopen_persistence": "passed",
+    "ecs_task_restart_persistence": "passed",
+    "tenant_isolation_all_repositories": "passed",
+    "verification_readiness_authority": "passed"
+  },
+  "postgresql_rows": {
+    "identity_records": 5,
+    "commercial_records": 49,
+    "processed_billing_events": 3,
+    "runtime_events": 20,
+    "companies": 1,
+    "verification_records": 0,
+    "cloud_proofs": 1
+  },
+  "commercial_result": {
+    "membership_role": "owner",
+    "build_business_status": "fulfillment_pending",
+    "build_and_run_status": "fulfillment_pending",
+    "subscription_status": "canceled",
+    "managed_grants_expired": 6,
+    "customer_owned_grants_active": 5,
+    "ready": false,
+    "fully_set": false,
+    "readiness_authority": "verification",
+    "billing_provider": "simulated_normalized_events",
+    "live_stripe": false
+  },
+  "safety": {
+    "production_touched": false,
+    "stromation_touched": false,
+    "real_customer_data_used": false,
+    "iam_deployer_created": false,
+    "aws_access_key_created": false,
+    "database_public": false,
+    "database_multi_az": false,
+    "secret_values_in_source_or_logs": false
+  }
+}
