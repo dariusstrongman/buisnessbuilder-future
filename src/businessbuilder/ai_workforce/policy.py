@@ -34,14 +34,38 @@ FOUNDER_BOUND_ACTIONS = frozenset({
     "submit_filing",
     "file_entity",
     "purchase_domain",
+    "buy_domain",
+    "register_domain",
     "pay",
     "make_payment",
     "open_account",
     "accept_provider_terms",
+    "accept_contract",
+    "agree_to_terms",
     "verify_identity",
     "attest_license",
     "choose_insurance",
     "hire_worker",
+    "setup_bank_account",
+    "setup_payment_account",
+    "submit_formation",
+    "approve_exceptional_quote",
+    "approve_exception_quote",
+    "issue_refund",
+    "approve_refund",
+    "execute_refund",
+    "publish_website",
+    "public_launch",
+    "launch_publicly",
+    "classify_employee",
+    "employee_classification",
+    "delete_account",
+    "destroy_account",
+    "close_account",
+    "launch_paid_media",
+    "run_paid_media",
+    "buy_ads",
+    "purchase_ads",
     "raise_budget",
     "bypass_approval",
     "approve_public_claim",
@@ -57,15 +81,54 @@ def is_founder_bound_action(action: str) -> bool:
     normalized = normalize_action(action)
     if normalized in FOUNDER_BOUND_ACTIONS:
         return True
+    tokens = frozenset(normalized.split("_"))
+    destructive_account_action = (
+        normalized.startswith(("delete_", "destroy_", "close_", "remove_", "terminate_"))
+        and "account" in tokens
+    )
+    bank_or_payment_account_setup = (
+        normalized.startswith(("setup_", "open_", "connect_"))
+        and "account" in tokens
+        and bool(tokens & {"bank", "banking", "payment", "payments"})
+    )
+    exceptional_quote_action = (
+        ("exceptional_quote" in normalized or "exception_quote" in normalized)
+        and normalized.startswith(("approve_", "accept_", "issue_", "send_", "execute_"))
+    )
+    refund_action = (
+        "refund" in tokens
+        and normalized.startswith((
+            "approve_", "issue_", "execute_", "process_", "send_", "make_", "refund_",
+        ))
+    )
+    employee_classification_action = (
+        normalized.startswith(("classify_", "set_classification_"))
+        and bool(tokens & {"employee", "worker", "employment"})
+    )
     return (
-        normalized.startswith(("sign_", "purchase_", "pay_", "hire_"))
-        or normalized.endswith("_filing")
+        destructive_account_action
+        or bank_or_payment_account_setup
+        or exceptional_quote_action
+        or refund_action
+        or employee_classification_action
+        or normalized.startswith(("sign_", "purchase_", "pay_", "hire_", "publish_"))
+        or normalized.endswith(("_filing", "_formation"))
         or normalized.startswith((
             "accept_terms_", "open_account_", "connect_account_", "verify_identity_",
             "attest_license_", "choose_insurance_", "select_insurance_",
             "raise_budget_", "increase_budget_", "bypass_approval_",
             "approve_claim_", "approve_public_claim_", "authorize_spend_", "file_entity_",
             "file_filing_", "file_formation_", "file_tax_",
+            "buy_domain_", "register_domain_", "accept_contract_", "agree_to_terms_",
+            "agree_to_contract_", "execute_contract_", "setup_bank_", "setup_payment_",
+            "open_bank_", "open_payment_", "connect_bank_", "connect_payment_",
+            "submit_formation_", "approve_exceptional_quote_", "approve_exception_quote_",
+            "approve_refund_", "issue_refund_", "execute_refund_", "refund_payment_",
+            "public_launch_", "launch_public_", "classify_employee_",
+            "employee_classification_", "delete_account_", "destroy_account_",
+            "close_account_", "launch_paid_", "run_paid_", "start_paid_", "activate_paid_",
+            "buy_ad_", "purchase_ad_",
+            "transfer_funds_", "wire_funds_", "remit_payment_",
         ))
     )
 
@@ -106,8 +169,11 @@ class WorkforcePolicyService:
         )
         if replay:
             return replay
-        if definition.version != 1 or definition.state is not RoleState.ACTIVE:
-            raise ValueError("new roles must begin as active version 1")
+        if (
+            definition.version != 1 or definition.authority_epoch != 1
+            or definition.state is not RoleState.ACTIVE
+        ):
+            raise ValueError("new roles must begin as active version 1 and authority epoch 1")
         if self.repository.current_definition(definition.tenant_id, definition.company_id, definition.role_id):
             raise ValueError("role already exists; use revise_role")
         self.repository.add_definition(definition)
@@ -147,11 +213,15 @@ class WorkforcePolicyService:
             current.tenant_id, current.company_id, current.role_id
         ):
             raise PermissionError("role identity and tenant scope are immutable")
-        self.repository.replace_definition(replace(current, state=RoleState.SUPERSEDED))
-        self.repository.add_definition(definition)
-        self._audit(definition, "workforce.role.revised", authority.actor_id, idempotency_key, current.to_projection(), definition.to_projection())
+        next_epoch = current.authority_epoch + 1
+        effective = replace(definition, authority_epoch=next_epoch)
+        self.repository.replace_definition(replace(
+            current, state=RoleState.SUPERSEDED, authority_epoch=next_epoch,
+        ))
+        self.repository.add_definition(effective)
+        self._audit(effective, "workforce.role.revised", authority.actor_id, idempotency_key, current.to_projection(), effective.to_projection())
         return self.repository.save_command(
-            definition.tenant_id, definition.company_id, idempotency_key, command_digest, definition
+            effective.tenant_id, effective.company_id, idempotency_key, command_digest, effective
         )
 
     def pause(self, tenant_id: str, company_id: str, role_id: str, *, expected_version: int, authority: ManagementAuthorityProof, idempotency_key: str) -> RoleDefinition:
@@ -186,7 +256,7 @@ class WorkforcePolicyService:
         if target is RoleState.PAUSED and current.state is not RoleState.ACTIVE:
             raise ValueError("only active roles can pause")
         before = current.to_projection()
-        changed = replace(current, state=target)
+        changed = replace(current, state=target, authority_epoch=current.authority_epoch + 1)
         self.repository.replace_definition(changed)
         self._audit(changed, f"workforce.role.{target.value}", authority.actor_id, idempotency_key, before, changed.to_projection())
         return self.repository.save_command(
@@ -207,6 +277,7 @@ class WorkforcePolicyService:
             if (
                 role is None or current is None or current.version != request.role_version
                 or role.state is not RoleState.ACTIVE
+                or existing.authority_epoch != role.authority_epoch
                 or existing.definition_digest != role.definition_digest
             ):
                 raise StalePolicyAuthority("cached evaluation is no longer authorized by the current active role")
@@ -230,6 +301,7 @@ class WorkforcePolicyService:
             company_id=request.company_id,
             role_id=request.role_id,
             role_version=request.role_version,
+            authority_epoch=role.authority_epoch if role else None,
             request_id=request.request_id,
             request_digest=request.request_digest,
             decision=decision,

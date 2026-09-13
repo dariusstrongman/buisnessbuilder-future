@@ -101,6 +101,43 @@ class DefinitionTests(WorkforceTestCase):
             self.assertEqual("founder_bound_action", result.reason_code)
             role = expanded
 
+    def test_authoritative_founder_actions_deny_even_when_explicitly_granted(self):
+        actions = (
+            "buy_domain", "accept_contract", "accept_provider_terms",
+            "setup_bank_account", "open_payment_account", "connect_business_bank_account",
+            "submit_formation", "file_llc_formation", "approve_exceptional_quote",
+            "execute_exceptional_quote", "issue_refund", "process_customer_refund",
+            "publish_website", "public_launch", "classify_employee",
+            "set_classification_for_worker", "hire_worker", "delete_account",
+            "destroy_bank_account", "launch_paid_media", "authorize_spend",
+        )
+        role = self.repository.current_definition(
+            BILLY_TENANT_ID, BILLY_COMPANY_ID, "role_inbox_assistant"
+        )
+        expanded = replace(
+            role,
+            version=role.version + 1,
+            grants=(CapabilityGrant("adversarial.capability", frozenset(actions)),),
+            denied_actions=frozenset(),
+            approval_actions=frozenset(),
+        )
+        expanded = self.service.revise_role(
+            expanded, expected_version=role.version, authority=BILLY_FOUNDER_AUTHORITY,
+            idempotency_key="grant-authoritative-founder-actions",
+        )
+        for index, action in enumerate(actions):
+            with self.subTest(action=action):
+                result = self.service.evaluate(self.request(
+                    request_id=f"authoritative-{index}",
+                    idempotency_key=f"authoritative-{index}",
+                    role_version=expanded.version,
+                    capability="adversarial.capability",
+                    action=action,
+                ))
+                self.assertEqual(PolicyDecision.DENY, result.decision)
+                self.assertEqual("founder_bound_action", result.reason_code)
+                self.assertFalse(result.permits_execution)
+
     def test_arbitrary_actor_cannot_create_or_self_escalate_role(self):
         attacker = ManagementAuthorityProof(
             proof_ref="forged-worker-proof", tenant_id=BILLY_TENANT_ID,
@@ -182,7 +219,7 @@ class PermissionTests(WorkforceTestCase):
     def test_explicit_deny_beats_any_other_path(self):
         result = self.service.evaluate(self.request(action="issue_refund"))
         self.assertEqual(PolicyDecision.DENY, result.decision)
-        self.assertEqual("explicitly_denied", result.reason_code)
+        self.assertEqual("founder_bound_action", result.reason_code)
 
     def test_approval_action_is_not_execution_permission(self):
         result = self.service.evaluate(self.request(
@@ -272,7 +309,8 @@ class ScopeBudgetAndLifecycleTests(WorkforceTestCase):
     def test_new_version_supersedes_old_and_old_requests_fail_closed(self):
         old = self.repository.current_definition(BILLY_TENANT_ID, BILLY_COMPANY_ID, "role_inbox_assistant")
         new = replace(old, version=2, objective=old.objective + " Version two.")
-        self.service.revise_role(new, expected_version=1, authority=BILLY_FOUNDER_AUTHORITY, idempotency_key="revise_2")
+        revised = self.service.revise_role(new, expected_version=1, authority=BILLY_FOUNDER_AUTHORITY, idempotency_key="revise_2")
+        self.assertEqual(old.authority_epoch + 1, revised.authority_epoch)
         stale = self.service.evaluate(self.request())
         current = self.service.evaluate(self.request(
             request_id="request_v2", idempotency_key="idem_v2", role_version=2
@@ -297,6 +335,8 @@ class ScopeBudgetAndLifecycleTests(WorkforceTestCase):
             expected_version=1, authority=BILLY_FOUNDER_AUTHORITY,
             idempotency_key="resume-after-allow",
         )
+        with self.assertRaises(StalePolicyAuthority):
+            self.service.evaluate(request)
         self.service.revoke(
             BILLY_TENANT_ID, BILLY_COMPANY_ID, "role_inbox_assistant",
             expected_version=1, authority=BILLY_FOUNDER_AUTHORITY,
@@ -304,6 +344,26 @@ class ScopeBudgetAndLifecycleTests(WorkforceTestCase):
         )
         with self.assertRaises(StalePolicyAuthority):
             self.service.evaluate(request)
+
+    def test_new_evaluation_after_resume_uses_new_authority_epoch(self):
+        old_request = self.request()
+        old = self.service.evaluate(old_request)
+        self.service.pause(
+            BILLY_TENANT_ID, BILLY_COMPANY_ID, "role_inbox_assistant",
+            expected_version=1, authority=BILLY_FOUNDER_AUTHORITY,
+            idempotency_key="epoch-pause",
+        )
+        resumed = self.service.resume(
+            BILLY_TENANT_ID, BILLY_COMPANY_ID, "role_inbox_assistant",
+            expected_version=1, authority=BILLY_FOUNDER_AUTHORITY,
+            idempotency_key="epoch-resume",
+        )
+        self.assertGreater(resumed.authority_epoch, old.authority_epoch)
+        fresh = self.service.evaluate(self.request(
+            request_id="fresh-after-resume", idempotency_key="fresh-after-resume",
+        ))
+        self.assertEqual(PolicyDecision.ALLOW, fresh.decision)
+        self.assertEqual(resumed.authority_epoch, fresh.authority_epoch)
 
     def test_cached_allow_fails_closed_after_version_superseded(self):
         request = self.request()

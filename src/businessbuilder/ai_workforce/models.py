@@ -96,6 +96,7 @@ class RoleDefinition:
     escalation_rules: tuple[EscalationRule, ...]
     budget: BudgetCeiling
     version: int = 1
+    authority_epoch: int = 1
     state: RoleState = RoleState.ACTIVE
     created_at: datetime = field(default_factory=utc_now)
 
@@ -104,6 +105,8 @@ class RoleDefinition:
             raise ValueError("role identity, scope, name, and objective are required")
         if self.version < 1:
             raise ValueError("role version must be positive")
+        if self.authority_epoch < 1:
+            raise ValueError("role authority epoch must be positive")
         granted = {action for grant in self.grants for action in grant.actions}
         overlap = granted & self.denied_actions
         if overlap:
@@ -139,6 +142,7 @@ class RoleDefinition:
                 "period": self.budget.period,
             },
             "version": self.version,
+            "authority_epoch": self.authority_epoch,
             "state": self.state.value,
             "created_at": self.created_at.isoformat(),
         }
@@ -194,6 +198,7 @@ class PolicyEvaluation:
     company_id: str
     role_id: str
     role_version: int
+    authority_epoch: int | None
     request_id: str
     request_digest: str
     decision: PolicyDecision

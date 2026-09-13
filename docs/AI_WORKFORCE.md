@@ -14,11 +14,11 @@ The Business Builder owns tenant-scoped role definitions, grants, denials, ceili
 4. Revisions create a new immutable version and supersede the previous version. Revocation is permanent.
 5. A returned `approval_required` or `escalate` decision never permits execution. Runtime must obtain a digest-bound approval or create a human exception path.
 6. Budget overruns escalate without changing the ceiling. Currency mismatch denies.
-7. AI workers can never sign or submit filings, pay, open accounts, accept provider terms, verify identity, attest licenses, select insurance, hire, raise budgets, bypass approval, approve public claims, or authorize spend.
+7. AI workers can never buy domains; sign or accept contracts/terms; submit filings or formation; open or set up bank/payment accounts; make payments or refunds; verify identity; attest licenses; select insurance; approve exceptional quotes; publish or publicly launch; classify or hire employees; destructively change accounts; operate paid media; raise budgets; bypass approval; approve public claims; or authorize spend.
 8. Idempotency keys are scoped by tenant/company. Exact replay returns the original evaluation while its authority remains current; reuse with a different request digest fails.
 9. Audit records are append-only product receipts. Projections can be rebuilt from definitions, evaluations, and audit records.
 10. Role creation, revision, pause, resume and revocation require an opaque authority proof validated by a trusted adapter as founder or authorized manager. Caller-supplied actor text is never authority.
-11. An exact evaluation replay is executable only while its bound definition remains the current active definition with the same digest. Pause, revocation, supersession or mutation fails the replay closed.
+11. An exact evaluation replay is executable only while its bound definition remains the current active definition with the same digest and monotonic authority epoch. Pause, resume, revocation, supersession or mutation permanently invalidates earlier evaluations.
 
 ## Billy Bob roles
 
@@ -33,4 +33,4 @@ The fixture is fictional and uses no provider credentials, live destinations, me
 
 ## Evaluation output
 
-Every evaluation records the bound role version and definition digest, request digest, decision, reason code, required human role if any, estimated cost, and timestamp. Only `allow` permits the caller to proceed to Core Runtime. `approval_required`, `escalate`, and `deny` are non-executable outcomes.
+Every evaluation records the bound role version, monotonic authority epoch and definition digest, request digest, decision, reason code, required human role if any, estimated cost, and timestamp. Only `allow` permits the caller to proceed to Core Runtime. `approval_required`, `escalate`, and `deny` are non-executable outcomes.
