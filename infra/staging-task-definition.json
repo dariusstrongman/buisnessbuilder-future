@@ -1,0 +1,67 @@
+{
+  "family": "businessbuilder-staging",
+  "taskRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-task-role",
+  "executionRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "web",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app:674433288033",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "portMappings": [
+        {
+          "name": "http",
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        {"name": "APP_VERSION", "value": "674433288033"},
+        {"name": "ENVIRONMENT", "value": "staging"},
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "DB_HOST", "value": "businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com"},
+        {"name": "DB_PORT", "value": "5432"},
+        {"name": "DB_NAME", "value": "businessbuilder"},
+        {"name": "DB_SCHEMA", "value": "businessbuilder"},
+        {"name": "DB_SSLMODE", "value": "require"},
+        {"name": "ARTIFACT_BUCKET", "value": "businessbuilder-staging-artifacts-199949321335-us-east-1"},
+        {"name": "JOB_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/199949321335/businessbuilder-staging-jobs"}
+      ],
+      "secrets": [
+        {"name": "DB_USER", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:username::"},
+        {"name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:password::"}
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/businessbuilder-staging",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "web"
+        }
+      }
+    }
+  ]
+}
