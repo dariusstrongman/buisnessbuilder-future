@@ -1,0 +1,49 @@
+{
+  "family": "businessbuilder-staging-agent-worker",
+  "taskRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-task-role",
+  "executionRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "agent-worker",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:e6055a6caff64d1829be0f100571b1f5025b846db39ced8f14a2fcdd6a64b939",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "command": ["python", "-m", "businessbuilder.agent_runtime.cloud_proof"],
+      "environment": [
+        {"name": "APP_VERSION", "value": "81691f39ec66890d1de891f50c96e9386a98a518"},
+        {"name": "ENVIRONMENT", "value": "staging"},
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "DB_HOST", "value": "businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com"},
+        {"name": "DB_PORT", "value": "5432"},
+        {"name": "DB_NAME", "value": "businessbuilder"},
+        {"name": "DB_SCHEMA", "value": "bb_agent_runtime_81691f39ec66"},
+        {"name": "DB_SSLMODE", "value": "require"},
+        {"name": "JOB_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/199949321335/businessbuilder-staging-jobs"},
+        {"name": "AGENT_RUNTIME_PROOF_ID", "value": "aws_agent_runtime_81691f39ec66"}
+      ],
+      "secrets": [
+        {"name": "DB_USER", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:username::"},
+        {"name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:password::"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/businessbuilder-staging",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "agent-worker"
+        }
+      }
+    }
+  ]
+}

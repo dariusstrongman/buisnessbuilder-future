@@ -1,0 +1,58 @@
+{
+  "proof": "aws-agent-runtime-v1",
+  "status": "passed",
+  "source_commit": "81691f39ec66890d1de891f50c96e9386a98a518",
+  "region": "us-east-1",
+  "image": {
+    "repository": "businessbuilder-staging-app",
+    "tag": "agent-81691f39ec66",
+    "digest": "sha256:e6055a6caff64d1829be0f100571b1f5025b846db39ced8f14a2fcdd6a64b939"
+  },
+  "execution": {
+    "cluster": "businessbuilder-staging",
+    "task_definition": "businessbuilder-staging-agent-worker:1",
+    "task_id": "331a099b826f4b509d78231411d8790e",
+    "launch_type": "FARGATE",
+    "exit_code": 0,
+    "bounded_one_off_task": true,
+    "shared_worker_model": true,
+    "existing_web_service_changed": false
+  },
+  "queue": {
+    "name": "businessbuilder-staging-jobs",
+    "messages_after_proof": 0,
+    "messages_in_flight_after_proof": 0,
+    "dlq": "businessbuilder-staging-agent-dlq",
+    "dlq_messages_after_proof": 0,
+    "max_receive_count": 3,
+    "job_payload_contained_credentials": false
+  },
+  "result": {
+    "backend": "postgresql+sqs+shared-fargate-task",
+    "agent_role": "role_inbox_assistant",
+    "capability": "communications.email",
+    "result_persisted": true,
+    "audit_recorded": true,
+    "canonical_result_event_count": 1,
+    "runtime_authority": true,
+    "duplicate_delivery_idempotent": true,
+    "restart_idempotent": true,
+    "expired_entitlement_denied": true,
+    "suspended_entitlement_denied": true,
+    "budget_ceiling_enforced": true,
+    "tenant_isolation": true,
+    "customer_owned_state_survived": true,
+    "company_brain_survived": true,
+    "real_external_actions": false,
+    "live_model_provider": false
+  },
+  "safety": {
+    "private_rds_preserved": true,
+    "production_touched": false,
+    "production_deployed": false,
+    "stromation_touched": false,
+    "live_stripe_used": false,
+    "real_customer_data_used": false,
+    "iam_principal_or_access_key_created": false
+  }
+}
