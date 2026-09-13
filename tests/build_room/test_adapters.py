@@ -64,6 +64,19 @@ class BuildRoomAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected fields"):
             adapt_job(job, title="Build", owner="Runtime")
 
+    def test_invalid_job_status_and_event_visibility_fail_closed(self) -> None:
+        records = canonical_billy_bob_records()
+
+        job = dict(records["jobs"][0])
+        job["status"] = "invented"
+        with self.assertRaisesRegex(ValueError, "job status is invalid"):
+            adapt_job(job, title="Build", owner="Runtime")
+
+        event = dict(records["events"][0])
+        event["visibility"] = "public"
+        with self.assertRaisesRegex(ValueError, "event visibility is invalid"):
+            adapt_event(event)
+
     def test_runtime_domain_job_and_event_are_accepted_by_adapters(self) -> None:
         now = datetime(2026, 9, 13, tzinfo=timezone.utc)
         job = Job(
