@@ -11,6 +11,8 @@ from businessbuilder.verification.fixtures import (
     billy_snapshot,
     populate_fully_set,
     populate_ready,
+    READY_DEFINITIONS,
+    verify_definition,
 )
 from businessbuilder.verification.models import Blocker, BlockerSeverity, FounderActionStatus
 from businessbuilder.verification.ports import FounderActionSnapshot
@@ -56,6 +58,51 @@ class ReadinessTests(unittest.TestCase):
         self.assertTrue(result.ready)
         self.assertFalse(result.fully_set)
         self.assertIn("monitoring", result.unmet_fully_set)
+
+    def test_each_deployment_and_qa_requirement_blocks_ready_when_omitted(self) -> None:
+        required = {"website.deployed", "website.https", "website.links", "website.mobile"}
+        for omitted in sorted(required):
+            with self.subTest(omitted=omitted):
+                repo = InMemoryVerificationRepository()
+                service = VerificationService(repo, self.registry)
+                evaluator = ReadinessEvaluator(repo, billy_bob_policy())
+                for sequence, definition_id in enumerate(
+                    (item for item in READY_DEFINITIONS if item != omitted), 1
+                ):
+                    verify_definition(service, self.registry, definition_id, sequence)
+                result = evaluator.evaluate(
+                    billy_snapshot(offer=True, service_area=True), at=FIXTURE_NOW
+                )
+                self.assertFalse(result.ready)
+                self.assertIn(
+                    {
+                        "website.deployed": "website_deployed",
+                        "website.https": "website_https",
+                        "website.links": "website_links",
+                        "website.mobile": "website_mobile",
+                    }[omitted],
+                    result.unmet_ready,
+                )
+
+    def test_failed_deployment_verification_blocks_ready(self) -> None:
+        populate_ready(self.service, self.registry)
+        deployed = next(
+            item
+            for item in self.repo.list_for_company(TENANT_ID, COMPANY_ID)
+            if item.definition_id == "website.deployed"
+        )
+        self.service.record_failure(
+            TENANT_ID,
+            COMPANY_ID,
+            deployed.verification_id,
+            "offline deployment smoke failed",
+            at=FIXTURE_NOW,
+        )
+        result = self.evaluator.evaluate(
+            billy_snapshot(offer=True, service_area=True), at=FIXTURE_NOW
+        )
+        self.assertFalse(result.ready)
+        self.assertIn("website_deployed", result.unmet_ready)
 
     def test_all_selected_requirements_make_fully_set(self) -> None:
         populate_fully_set(self.service, self.registry)

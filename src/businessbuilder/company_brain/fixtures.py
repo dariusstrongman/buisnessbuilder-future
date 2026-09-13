@@ -37,7 +37,10 @@ def load_billy_bob(service: CompanyBrainService, tenant_id: str = "tenant_billy"
                             data={"founder_hours_per_week":24,"travel_buffer_pct":25,"weather_buffer_pct":15,"safe_weekly_jobs_hypothesis":18},
                             confidence=.45, provenance=(source,), owner_ref=founder)
     service.record_decision(scope, decision_id="decision_launch_wedge",
-                            data={"question":"Launch recurring mow/edge/blow first?","choice":"approved","exclusions":["chemicals","irrigation","tree work","hardscape"]},
+                            data={"question":"Launch recurring mow/edge/blow first?","choice":"approved",
+                                  "approved_offer_ids":["offer_recurring_lawn"],
+                                  "approved_service_area_ids":["market_denton_12mi"],
+                                  "exclusions":["chemicals","irrigation","tree work","hardscape"]},
                             provenance=(source,), owner_ref=founder)
     service.append_founder_action(scope, action_id="founder_buy_domain",
                                   data={"action_type":"purchase","title":"Buy the selected domain in Billy Bob's account","state":"required","irreversible":True},

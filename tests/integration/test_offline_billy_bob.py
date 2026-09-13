@@ -13,10 +13,11 @@ from businessbuilder.company_brain import (
 )
 from businessbuilder.fixtures.billy_bob import COMPANY_ID, FIXED_NOW, JOB_ID, TENANT_ID, run_billy_bob
 from businessbuilder.integration import CompanyBrainRuntimeAdapter, CompanyBrainVerificationAdapter
+from businessbuilder.integration.adapters import CUSTOMER_PATH_DEFINITIONS
 from businessbuilder.runtime.fakes import FakeCapability
 from businessbuilder.runtime.models import ApprovalMode, Budget, JobStatus, Money
 from businessbuilder.runtime.models import Event
-from businessbuilder.verification import IllegalTransitionError, VerificationState
+from businessbuilder.verification import IllegalTransitionError, ReadinessEvaluator, VerificationState, billy_bob_policy
 
 
 class OfflineBillyBobIntegrationTests(unittest.TestCase):
@@ -32,7 +33,7 @@ class OfflineBillyBobIntegrationTests(unittest.TestCase):
         self.assertIsInstance(self.proof["brain_verification_adapter"], CompanyBrainVerificationAdapter)
         self.assertEqual(JobStatus.SUCCEEDED, self.proof["job"].status)
         self.assertEqual(1, self.proof["website_execute_count"])
-        self.assertEqual(10, len(self.proof["proposed_verifications"]))
+        self.assertEqual(14, len(self.proof["proposed_verifications"]))
         self.assertTrue(all(item.state is VerificationState.PROPOSED for item in self.proof["proposed_verifications"]))
         self.assertEqual(271, self.proof["budget"].settled_minor)
         self.assertEqual(0, self.proof["budget"].reserved_minor)
@@ -42,10 +43,41 @@ class OfflineBillyBobIntegrationTests(unittest.TestCase):
     def test_ready_and_fully_set_transitions_are_owned_by_verification(self) -> None:
         self.assertFalse(self.proof["initial"].ready)
         self.assertFalse(self.proof["initial"].fully_set)
+        self.assertEqual("package_ready", self.proof["package_status"])
+        self.assertFalse(self.proof["package_ready_checkpoint"].ready)
+        self.assertFalse(self.proof["package_ready_checkpoint"].fully_set)
         self.assertTrue(self.proof["ready_only"].ready)
         self.assertFalse(self.proof["ready_only"].fully_set)
         self.assertTrue(self.proof["fully_set"].ready)
         self.assertTrue(self.proof["fully_set"].fully_set)
+
+    def test_package_ready_contains_no_deployment_or_live_inference(self) -> None:
+        deployment_definitions = {
+            "website.deployed", "website.https", "website.links", "website.mobile"
+        }
+        records = {
+            item.definition_id: item for item in self.proof["proposed_verifications"]
+        }
+        self.assertTrue(deployment_definitions.issubset(records))
+        self.assertTrue(
+            all(records[definition_id].state is VerificationState.PROPOSED for definition_id in deployment_definitions)
+        )
+        self.assertTrue(
+            all(not records[definition_id].evidence for definition_id in deployment_definitions)
+        )
+        final_records = {
+            item.definition_id: item for item in self.proof["verification_records"]
+        }
+        offline_evidence = tuple(
+            evidence
+            for definition_id in deployment_definitions
+            for evidence in final_records[definition_id].evidence
+        )
+        self.assertTrue(offline_evidence)
+        self.assertTrue(all(item.issuer == "deterministic-offline-qa" for item in offline_evidence))
+        self.assertTrue(
+            all(item.provenance.get("not_live_provider_evidence") is True for item in offline_evidence)
+        )
 
     def test_company_brain_dependency_change_invalidates_readiness(self) -> None:
         self.assertEqual(4, len(self.proof["invalidations"]))
@@ -95,6 +127,83 @@ class OfflineBillyBobIntegrationTests(unittest.TestCase):
         self.assertFalse(self.proof["runtime"].events.publish(event))
         self.assertEqual(count, len(self.proof["verification"].list_for_company(TENANT_ID, COMPANY_ID)))
         self.assertEqual(request_count, len(port.requests))
+
+    def test_retry_repairs_dependency_after_partial_adapter_failure(self) -> None:
+        port = self.proof["verification_port"]
+        brain = self.proof["brain"]
+        original_add_dependency = brain.add_dependency
+        calls = 0
+
+        def fail_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("injected dependency registration failure")
+            return original_add_dependency(*args, **kwargs)
+
+        brain.add_dependency = fail_once
+        job_id = "job_partial_dependency"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                port.request_verification(
+                    tenant_id=TENANT_ID,
+                    company_id=COMPANY_ID,
+                    job_id=job_id,
+                    artifact_refs=[{"type": "artifact", "id": "artifact_partial", "version": 1}],
+                    correlation_id="correlation_partial",
+                )
+        finally:
+            brain.add_dependency = original_add_dependency
+
+        form_id = port.verification_id(job_id, "website.forms")
+        self.assertEqual(
+            VerificationState.PROPOSED,
+            self.proof["verification"].get(TENANT_ID, COMPANY_ID, form_id).state,
+        )
+        port.request_verification(
+            tenant_id=TENANT_ID,
+            company_id=COMPANY_ID,
+            job_id=job_id,
+            artifact_refs=[{"type": "artifact", "id": "artifact_partial", "version": 1}],
+            correlation_id="correlation_partial",
+        )
+        dependencies = self.proof["brain_repository"].dependencies_for(
+            Scope(TENANT_ID, COMPANY_ID), "market_denton_12mi"
+        )
+        self.assertEqual(1, sum(item.dependent_ref.id == form_id for item in dependencies))
+        self.assertEqual(
+            len(CUSTOMER_PATH_DEFINITIONS) + 4,
+            sum(
+                item.provenance.get("job_id") == job_id
+                for item in self.proof["verification"].list_for_company(TENANT_ID, COMPANY_ID)
+            ),
+        )
+
+    def test_unapproved_offer_and_market_records_do_not_satisfy_readiness(self) -> None:
+        brain = self.proof["brain"]
+        scope = Scope(TENANT_ID, COMPANY_ID)
+        decision = next(
+            item
+            for item in brain.query_current_state(scope, kinds=(RecordKind.DECISION,))
+            if item.record_id == "decision_launch_wedge"
+        )
+        brain.record_decision(
+            scope,
+            decision_id=decision.record_id,
+            data={"choice": "withdrawn"},
+            provenance=decision.provenance,
+            owner_ref=decision.owner_ref,
+            expected_version=decision.version,
+        )
+        snapshot = self.proof["brain_verification_adapter"].get_snapshot(TENANT_ID, COMPANY_ID)
+        self.assertEqual((), snapshot.approved_offer_ids)
+        self.assertEqual((), snapshot.approved_service_area_ids)
+        result = ReadinessEvaluator(
+            self.proof["verification"].repository, billy_bob_policy()
+        ).evaluate(snapshot, at=FIXED_NOW)
+        self.assertFalse(result.ready)
+        self.assertIn("approved_offer", result.unmet_ready)
+        self.assertIn("approved_service_area", result.unmet_ready)
 
     def test_stale_company_brain_record_write_is_rejected(self) -> None:
         brain = self.proof["brain"]

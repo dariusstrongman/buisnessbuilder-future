@@ -1,12 +1,12 @@
 # Business Builder Build Status
 
-Last verified: 2026-09-13T02:04:51Z
+Last verified: 2026-09-13T02:15:32Z
 
 GitHub refs, commits, checks, and repository contents are execution truth. This file is the durable coordination summary and must be corrected whenever GitHub disagrees.
 
 ## Program posture
 
-- Current checkpoint: **offline spine assembled and durably preserved; independent review is next**.
+- Current checkpoint: **offline spine preserved; first independent-review blockers corrected on `fix/offline-readiness-proof`; follow-up review is next**.
 - Production posture: **no production integration or infrastructure work is authorized**.
 - Real Website Capability: **held** until Claude explicitly declares the Stromation website engine ready for integration.
 - Current external capability: `fake.website.build` is intentionally the only fake external capability in the integrated offline journey.
@@ -44,7 +44,7 @@ The content is byte-identical at the Git tree level. Only the commit SHA and anc
 | Company Brain / Head | W1 | Integrated branch | Source `b5a44761...`; published integration `fbaee89a...` | Integrated | v1/v2 contracts | None found in offline scope | Included in 89-test combined suite | Integrated offline | Review public adapter only; no internal coupling |
 | Core Runtime + nervous system / Torso | W2 | Integrated branch | Source `2148e04f...`; published integration `fbaee89a...` | Integrated and repackaged under `businessbuilder.runtime` | Company Brain reader and Verification ports | Synchronous SQLite/in-process design is dev-only | Included in 89-test combined suite | Integrated offline | Independent diff/API review |
 | Verification / Left leg | W3 | Integrated branch | Source `1c6820c...`; published integration `fbaee89a...` | Integrated under `businessbuilder.verification` | Company Brain invalidations; Runtime verification requests | JSON/in-memory repository is dev-only | Included in 89-test combined suite | Integrated offline | Independent diff/readiness review |
-| Offline Integration | W4 | `integration/offline-billy-bob-v1` | Published `fbaee89ae3cd504602f69e5a04d4720248fc515f`; source local `2c8549c...` | **Durably preserved; main unchanged** | Company Brain + Runtime + Verification | Needs independent code review and hosted CI before merge decision | 89/89 tests independently rerun locally; exact tree verified | Ready for review, not yet accepted into main | Review additive v2 contracts, adapters, boundary ownership, and test gaps; then accept/fix/hold |
+| Offline Integration | targeted fix worker | `fix/offline-readiness-proof` based on published `2129e130...` | Local fix commit reported by worker; base integration content `fbaee89a...` | **Acceptance blockers corrected locally; main unchanged** | Company Brain + Runtime + Verification | Follow-up independent review and hosted CI still required | 97/97 canonical tests pass locally; focused package-ready, dependency-retry, tenant-evidence, approval-binding, and scenario-set regressions added | Ready for follow-up review, not merge yet | Inspect exact fix commit, then accept/fix/hold |
 | Additive tenant-aware v2 contracts | W4 integration | Integrated branch | `fbaee89a...` | Added without removing v1 | v1 semantics | Must be reviewed as a deliberate public contract release; future real Website adapter must support v2 | Four v2 compatibility tests pass; all company-bound public objects require `tenant_id`; capability definition remains global | Review required | Freeze only after independent schema-diff review |
 | Setup/Admin / Left arm | W5 | `worker5/setup-admin` | Pending; worker paused during preservation | Restarting from published integration base | Integrated public boundaries + released contracts | No filing, purchasing, insurance selection, professional advice, live providers, or production | Required: Billy Bob, tenant isolation, Do It/Guide/Skip history, founder/external authority gates | Pending | Rebase/restart on `fbaee89a...`; isolated subsystem only |
 | AI Workforce Product / Right leg | W8 | `worker8/ai-workforce-product` | Pending; worker paused during preservation | Restarting from published integration base | Integrated Runtime policy concepts + released contracts | Must not duplicate Sol, agent runtime, provider execution, or model routing | Required: adversarial permissions, denied actions, budgets, escalation, tenant isolation, Billy Bob roles | Pending | Rebase/restart on `fbaee89a...`; policy/domain layer only |
@@ -63,16 +63,18 @@ The preserved integrated code proves:
 3. Runtime reserves 400 minor units, the fake website capability settles 271, and 129 is released;
 4. Runtime emits canonical progress, completion, audit, and `verification.requested` events;
 5. the real Runtime-to-Verification adapter creates deterministic Proposed records without duplicate side effects;
-6. Verification alone moves readiness from `false/false` to Ready `true` / Fully Set `false`, then `true/true`;
-7. a Company Brain service-area version change invalidates geography-bound verification and returns readiness to `false/false`;
-8. tenant/company mismatches, stale writes, invalid transitions, budget overrun, and unauthorized approval fail closed.
+6. the `package_ready` checkpoint leaves all verification Proposed and readiness `false/false`, with no deployment or live inference;
+7. a distinct deterministic offline deployment/QA phase supplies explicitly non-live evidence for deployment, HTTPS, links, mobile, and the remaining customer path;
+8. Verification then moves readiness to Ready `true` / Fully Set `false`, then `true/true` after admin completion;
+9. a Company Brain service-area version change invalidates geography-bound verification and returns readiness to `false/false`;
+10. tenant/company mismatches, same-company cross-tenant evidence, unapproved offer/market facts, partial dependency writes, incomplete scenario sets, stale writes, invalid transitions, budget overrun, and unauthorized approval fail closed.
 
 ## Review gates before merging integration to main
 
 1. Compare every v2 schema to v1 and confirm the only semantic change is required `tenant_id` plus version identifiers.
 2. Inspect `CompanyBrainRuntimeAdapter`, `CompanyBrainVerificationAdapter`, `RuntimeVerificationAdapter`, and `VerificationInvalidationAdapter` for internal imports or duplicated authority.
-3. Confirm `package_ready` cannot become live, Ready, or Fully Set without separate evidence.
-4. Run the 89-test command from a clean checkout and add hosted CI.
+3. Re-review the corrected proof that `package_ready` cannot become live, Ready, or Fully Set without a distinct deployment/QA evidence phase.
+4. Run the 97-test command from a clean checkout and add hosted CI.
 5. Confirm setup/admin and AI-workforce branches touch only their owned directories and public seams.
 6. Open a reviewed PR; do not merge merely because tests pass.
 
@@ -81,4 +83,3 @@ The preserved integrated code proves:
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
 ```
-

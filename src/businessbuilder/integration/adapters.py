@@ -9,6 +9,7 @@ from businessbuilder.company_brain import (
     CompanyBrainService,
     EntityRef,
     InvalidationNotice,
+    KnowledgeClass,
     NotFoundError,
     RecordKind,
     Scope,
@@ -27,7 +28,11 @@ from businessbuilder.verification.events import CanonicalEvent
 
 
 CUSTOMER_PATH_DEFINITIONS = (
+    "website.deployed",
+    "website.https",
     "website.forms",
+    "website.mobile",
+    "website.links",
     "email.inbound",
     "crm.lead_capture",
     "workflow.quote",
@@ -73,8 +78,32 @@ class CompanyBrainVerificationAdapter:
         company = self.service.get_company(scope)
         records = self.service.query_current_state(scope)
 
-        offers = tuple(item.record_id for item in records if item.kind is RecordKind.OFFER)
-        service_areas = tuple(item.record_id for item in records if item.kind is RecordKind.MARKET)
+        active_offers = {
+            item.record_id for item in records if item.kind is RecordKind.OFFER and item.lifecycle == "active"
+        }
+        active_service_areas = {
+            item.record_id for item in records if item.kind is RecordKind.MARKET and item.lifecycle == "active"
+        }
+        decisions = tuple(
+            item
+            for item in records
+            if item.kind is RecordKind.DECISION
+            and item.knowledge_class is KnowledgeClass.FOUNDER_DECISION
+            and item.lifecycle == "active"
+            and item.data.get("choice") == "approved"
+        )
+        approved_offer_refs = {
+            str(record_id)
+            for decision in decisions
+            for record_id in decision.data.get("approved_offer_ids", ())
+        }
+        approved_service_area_refs = {
+            str(record_id)
+            for decision in decisions
+            for record_id in decision.data.get("approved_service_area_ids", ())
+        }
+        offers = tuple(sorted(active_offers & approved_offer_refs))
+        service_areas = tuple(sorted(active_service_areas & approved_service_area_refs))
         accounts = tuple(item for item in records if item.kind is RecordKind.ACCOUNT)
         actions = tuple(item for item in records if item.kind is RecordKind.FOUNDER_ACTION)
         obligations = tuple(item for item in records if item.kind is RecordKind.OBLIGATION)
@@ -205,15 +234,18 @@ class RuntimeVerificationAdapter:
                     **({"created_at": now, "updated_at": now} if now else {}),
                 )
                 self.verification.create(record)
-                if definition_id in GEOGRAPHY_BOUND_DEFINITIONS:
-                    self.company_brain.add_dependency(
-                        scope,
-                        source_record_id=dependency.dependency_id,
-                        dependent_ref=EntityRef("verification", verification_id),
-                        trigger="service_area.changed",
-                    )
                 self.requested_ids.append(verification_id)
                 created_any = True
+            # Dependency registration is a distinct idempotent side effect. Always
+            # reconcile it, including when a prior attempt created Verification but
+            # failed before Company Brain recorded the dependency.
+            if definition_id in GEOGRAPHY_BOUND_DEFINITIONS:
+                self.company_brain.add_dependency(
+                    scope,
+                    source_record_id=dependency.dependency_id,
+                    dependent_ref=EntityRef("verification", verification_id),
+                    trigger="service_area.changed",
+                )
         if created_any:
             self.requests.append(
                 {

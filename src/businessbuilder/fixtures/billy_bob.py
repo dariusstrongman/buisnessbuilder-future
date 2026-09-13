@@ -86,35 +86,47 @@ def _verify_definition(
     definition = service.registry.get(definition_id)
     service.transition(TENANT_ID, COMPANY_ID, verification_id, VerificationState.EXECUTED, at=FIXED_NOW)
     evidence: list[EvidenceRef] = []
-    defined_test = sorted(definition.defined_tests)[0]
-    for index, evidence_type in enumerate(sorted(definition.required_evidence_types, key=lambda item: item.value)):
+    defined_tests = sorted(definition.defined_tests)
+    for index, defined_test in enumerate(defined_tests):
         evidence.append(
             EvidenceRef(
                 evidence_id=f"evidence_{verification_id[-8:]}_{index}",
-                evidence_type=evidence_type,
-                artifact_ref=artifact_id,
-                company_id=COMPANY_ID,
-                captured_at=FIXED_NOW,
-                expires_at=FIXED_NOW + timedelta(days=365),
-                test_name=defined_test if evidence_type is EvidenceType.TEST_RESULT else None,
-                test_passed=True if evidence_type is EvidenceType.TEST_RESULT else None,
-                issuer="fixture-provider",
-                provenance={"source_type": "deterministic_offline_fixture"},
-            )
-        )
-    if EvidenceType.TEST_RESULT not in definition.required_evidence_types:
-        evidence.append(
-            EvidenceRef(
-                evidence_id=f"evidence_{verification_id[-8:]}_test",
                 evidence_type=EvidenceType.TEST_RESULT,
                 artifact_ref=artifact_id,
+                tenant_id=TENANT_ID,
                 company_id=COMPANY_ID,
                 captured_at=FIXED_NOW,
                 expires_at=FIXED_NOW + timedelta(days=365),
                 test_name=defined_test,
                 test_passed=True,
-                issuer="fixture-provider",
-                provenance={"source_type": "deterministic_offline_fixture"},
+                issuer="deterministic-offline-qa",
+                provenance={
+                    "source_type": "deterministic_offline_fixture",
+                    "phase": "offline_deployment_and_qa",
+                    "not_live_provider_evidence": True,
+                },
+            )
+        )
+    next_index = len(defined_tests)
+    for index, evidence_type in enumerate(
+        sorted(definition.required_evidence_types - {EvidenceType.TEST_RESULT}, key=lambda item: item.value),
+        next_index,
+    ):
+        evidence.append(
+            EvidenceRef(
+                evidence_id=f"evidence_{verification_id[-8:]}_{index}",
+                evidence_type=evidence_type,
+                artifact_ref=artifact_id,
+                tenant_id=TENANT_ID,
+                company_id=COMPANY_ID,
+                captured_at=FIXED_NOW,
+                expires_at=FIXED_NOW + timedelta(days=365),
+                issuer="deterministic-offline-qa",
+                provenance={
+                    "source_type": "deterministic_offline_fixture",
+                    "phase": "offline_deployment_and_qa",
+                    "not_live_provider_evidence": True,
+                },
             )
         )
     service.transition(
@@ -126,6 +138,16 @@ def _verify_definition(
         at=FIXED_NOW,
     )
     service.transition(TENANT_ID, COMPANY_ID, verification_id, VerificationState.VERIFIED, at=FIXED_NOW)
+
+
+def _apply_offline_deployment_and_qa_evidence(
+    service: VerificationService,
+    adapter: RuntimeVerificationAdapter,
+    artifact_id: str,
+) -> None:
+    """Simulate a later deployment/QA phase without claiming a live provider action."""
+    for definition_id in CUSTOMER_PATH_DEFINITIONS:
+        _verify_definition(service, adapter, definition_id, artifact_id)
 
 
 def run_billy_bob() -> dict[str, Any]:
@@ -227,8 +249,20 @@ def run_billy_bob() -> dict[str, Any]:
         verification.get(TENANT_ID, COMPANY_ID, verification_port.verification_id(JOB_ID, definition_id))
         for definition_id in (*CUSTOMER_PATH_DEFINITIONS, *ADMIN_DEFINITIONS)
     )
-    for definition_id in CUSTOMER_PATH_DEFINITIONS:
-        _verify_definition(verification, verification_port, definition_id, artifact.id)
+    package_ready_checkpoint = readiness.evaluate(
+        brain_verification.get_snapshot(TENANT_ID, COMPANY_ID), at=FIXED_NOW
+    )
+    assert website.status(job.provider_ref or "") == "package_ready"
+    assert all(item.state is VerificationState.PROPOSED for item in proposed)
+    assert not package_ready_checkpoint.ready
+    assert not package_ready_checkpoint.fully_set
+    assert not any(
+        item.definition_id in {"website.deployed", "website.https", "website.links", "website.mobile"}
+        and item.state is VerificationState.VERIFIED
+        for item in proposed
+    )
+
+    _apply_offline_deployment_and_qa_evidence(verification, verification_port, artifact.id)
     ready_only = readiness.evaluate(brain_verification.get_snapshot(TENANT_ID, COMPANY_ID), at=FIXED_NOW)
 
     action = next(
@@ -282,6 +316,8 @@ def run_billy_bob() -> dict[str, Any]:
         "verification_request_ids": tuple(verification_port.requested_ids),
         "verification_requests": verification_port.requests,
         "initial": initial,
+        "package_ready_checkpoint": package_ready_checkpoint,
+        "package_status": website.status(job.provider_ref or ""),
         "ready_only": ready_only,
         "fully_set": fully_set,
         "invalidations": invalidations,

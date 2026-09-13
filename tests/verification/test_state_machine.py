@@ -47,6 +47,39 @@ class VerificationStateMachineTests(unittest.TestCase):
         with self.assertRaises(MissingEvidenceError):
             self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.TESTED, evidence=(wrong,))
 
+    def test_every_defined_scenario_must_pass(self) -> None:
+        record = proposed_record("verification_quote_scenarios", "workflow.quote")
+        self.service.create(record)
+        self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED)
+        standard_only = evidence(
+            "evidence_quote_standard",
+            EvidenceType.TEST_RESULT,
+            test_name="quote-standard",
+            passed=True,
+        )
+        with self.assertRaisesRegex(MissingEvidenceError, "quote-exception"):
+            self.service.transition(
+                TENANT_ID,
+                COMPANY_ID,
+                record.verification_id,
+                VerificationState.TESTED,
+                evidence=(standard_only,),
+            )
+        exception = evidence(
+            "evidence_quote_exception",
+            EvidenceType.TEST_RESULT,
+            test_name="quote-exception",
+            passed=True,
+        )
+        tested = self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.TESTED,
+            evidence=(standard_only, exception),
+        )
+        self.assertEqual(VerificationState.TESTED, tested.state)
+
     def test_verified_requires_owner_scope_and_all_evidence(self) -> None:
         record = proposed_record("verification_form", "website.forms", owner=None)
         self.service.create(record)
@@ -128,6 +161,56 @@ class VerificationStateMachineTests(unittest.TestCase):
         with self.assertRaisesRegex(MissingEvidenceError, "new passing test evidence"):
             self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.VERIFIED, at=FIXTURE_NOW)
 
+    def test_failure_retest_requires_every_defined_scenario_to_be_new(self) -> None:
+        record = proposed_record("verification_quote_retest", "workflow.quote")
+        self.service.create(record)
+        self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED, at=FIXTURE_NOW)
+        old_standard = evidence(
+            "evidence_old_standard", EvidenceType.TEST_RESULT, test_name="quote-standard", passed=True
+        )
+        old_exception = evidence(
+            "evidence_old_exception", EvidenceType.TEST_RESULT, test_name="quote-exception", passed=True
+        )
+        audit = evidence("evidence_quote_audit", EvidenceType.AUDIT_RECORD)
+        self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.TESTED,
+            evidence=(old_standard, old_exception, audit),
+            at=FIXTURE_NOW,
+        )
+        self.service.transition(
+            TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.VERIFIED, at=FIXTURE_NOW
+        )
+        self.service.record_failure(
+            TENANT_ID, COMPANY_ID, record.verification_id, "quote regression", at=FIXTURE_NOW
+        )
+        new_standard = evidence(
+            "evidence_new_standard", EvidenceType.TEST_RESULT, test_name="quote-standard", passed=True
+        )
+        with self.assertRaisesRegex(MissingEvidenceError, "quote-exception"):
+            self.service.transition(
+                TENANT_ID,
+                COMPANY_ID,
+                record.verification_id,
+                VerificationState.VERIFIED,
+                evidence=(new_standard,),
+                at=FIXTURE_NOW,
+            )
+        new_exception = evidence(
+            "evidence_new_exception", EvidenceType.TEST_RESULT, test_name="quote-exception", passed=True
+        )
+        verified = self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.VERIFIED,
+            evidence=(new_standard, new_exception),
+            at=FIXTURE_NOW,
+        )
+        self.assertEqual(VerificationState.VERIFIED, verified.state)
+
     def test_cross_company_evidence_is_rejected(self) -> None:
         record = proposed_record("verification_cross_company", "website.links")
         self.service.create(record)
@@ -135,6 +218,27 @@ class VerificationStateMachineTests(unittest.TestCase):
         foreign = evidence("evidence_foreign", EvidenceType.TEST_RESULT, company_id="company_other", test_name="link-crawl", passed=True)
         with self.assertRaises(VerificationError):
             self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.TESTED, evidence=(foreign,))
+
+    def test_same_company_id_cross_tenant_evidence_is_rejected(self) -> None:
+        record = proposed_record("verification_cross_tenant", "website.links")
+        self.service.create(record)
+        self.service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED)
+        foreign = evidence(
+            "evidence_foreign_tenant",
+            EvidenceType.TEST_RESULT,
+            tenant_id="tenant_other",
+            company_id=COMPANY_ID,
+            test_name="link-crawl",
+            passed=True,
+        )
+        with self.assertRaisesRegex(VerificationError, "cross-tenant"):
+            self.service.transition(
+                TENANT_ID,
+                COMPANY_ID,
+                record.verification_id,
+                VerificationState.TESTED,
+                evidence=(foreign,),
+            )
 
     def test_tenant_and_company_isolation(self) -> None:
         self.service.create(proposed_record("verification_isolated", "website.links"))

@@ -51,6 +51,10 @@ def billy_bob_policy() -> ReadinessPolicy:
         ready_requirements=(
             Requirement("approved_offer", "Approved offer exists", fact, ("approved_offer",)),
             Requirement("approved_service_area", "Approved service area exists", fact, ("approved_service_area",)),
+            Requirement("website_deployed", "Website deployment is independently verified", verify, ("website.deployed",)),
+            Requirement("website_https", "Website HTTPS is independently verified", verify, ("website.https",)),
+            Requirement("website_links", "Website links are independently verified", verify, ("website.links",)),
+            Requirement("website_mobile", "Website mobile behavior is independently verified", verify, ("website.mobile",)),
             Requirement("customer_contact", "Customer contact path is verified", any_verify, ("website.forms", "email.inbound")),
             Requirement("lead_intake", "Lead intake is tested and verified", verify, ("crm.lead_capture",)),
             Requirement("quote_path", "Quote path is tested and verified", verify, ("workflow.quote",)),

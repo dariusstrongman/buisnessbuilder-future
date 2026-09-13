@@ -72,6 +72,7 @@ class EvidenceRef:
     evidence_id: str
     evidence_type: EvidenceType
     artifact_ref: str
+    tenant_id: str
     company_id: str
     captured_at: datetime
     expires_at: datetime | None = None
@@ -97,6 +98,7 @@ class EvidenceRef:
             "evidence_id": self.evidence_id,
             "evidence_type": self.evidence_type.value,
             "artifact_ref": self.artifact_ref,
+            "tenant_id": self.tenant_id,
             "company_id": self.company_id,
             "captured_at": iso(self.captured_at),
             "expires_at": iso(self.expires_at),
@@ -112,6 +114,7 @@ class EvidenceRef:
             evidence_id=value["evidence_id"],
             evidence_type=EvidenceType(value["evidence_type"]),
             artifact_ref=value["artifact_ref"],
+            tenant_id=value["tenant_id"],
             company_id=value["company_id"],
             captured_at=datetime.fromisoformat(value["captured_at"].replace("Z", "+00:00")),
             expires_at=(

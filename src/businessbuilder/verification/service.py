@@ -66,14 +66,19 @@ class VerificationService:
         expected = NEXT_STATE.get(record.state)
         if target_state is not expected:
             raise IllegalTransitionError(f"illegal transition: {record.state.value} -> {target_state.value}")
-        if record.failure_reason and target_state is VerificationState.VERIFIED and not any(
-            item.supports_defined_test(definition.defined_tests, now) for item in evidence
-        ):
-            raise MissingEvidenceError("new passing test evidence is required after a recorded failure")
-        if record.stale_reason and target_state is VerificationState.TESTED and not any(
-            item.supports_defined_test(definition.defined_tests, now) for item in evidence
-        ):
-            raise MissingEvidenceError("new passing test evidence is required after invalidation")
+        if record.failure_reason and target_state is VerificationState.VERIFIED:
+            missing = self._missing_defined_tests(evidence, definition, now)
+            if missing:
+                raise MissingEvidenceError(
+                    "new passing test evidence is required after a recorded failure for: "
+                    + ", ".join(missing)
+                )
+        if record.stale_reason and target_state is VerificationState.TESTED:
+            missing = self._missing_defined_tests(evidence, definition, now)
+            if missing:
+                raise MissingEvidenceError(
+                    "new passing test evidence is required after invalidation for: " + ", ".join(missing)
+                )
         candidate = record.with_update(
             state=target_state,
             evidence=self._merge_evidence(record.evidence, evidence),
@@ -170,13 +175,31 @@ class VerificationService:
 
     @staticmethod
     def _check_evidence_scope(record: VerificationRecord) -> None:
-        if any(item.company_id != record.company_id for item in record.evidence):
-            raise VerificationError("cross-company evidence is forbidden")
+        if any(
+            item.tenant_id != record.tenant_id or item.company_id != record.company_id
+            for item in record.evidence
+        ):
+            raise VerificationError("cross-tenant or cross-company evidence is forbidden")
 
     @staticmethod
     def _require_defined_test(record: VerificationRecord, definition: VerificationDefinition, at: datetime) -> None:
-        if not any(item.supports_defined_test(definition.defined_tests, at) for item in record.evidence):
-            raise MissingEvidenceError("tested requires a current passing result for a defined test")
+        missing = VerificationService._missing_defined_tests(record.evidence, definition, at)
+        if missing:
+            raise MissingEvidenceError(
+                "tested requires current passing results for every defined test; missing: "
+                + ", ".join(missing)
+            )
+
+    @staticmethod
+    def _missing_defined_tests(
+        evidence: tuple[EvidenceRef, ...], definition: VerificationDefinition, at: datetime
+    ) -> tuple[str, ...]:
+        passed = {
+            item.test_name
+            for item in evidence
+            if item.supports_defined_test(definition.defined_tests, at)
+        }
+        return tuple(sorted(definition.defined_tests - passed))
 
     def _require_verified(self, record: VerificationRecord, definition: VerificationDefinition, at: datetime) -> None:
         if not record.owner or not record.scope.strip():

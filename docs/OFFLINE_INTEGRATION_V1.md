@@ -30,7 +30,7 @@ The former `businessbuilder_runtime` package moved to `businessbuilder.runtime`.
 
 `CompanyBrainVerificationAdapter` is the explicit readiness projection for approved offers, service areas, owners, requirements, obligations, and founder actions. Founder actions remain excluded from `compact_snapshot()` as designed.
 
-`RuntimeVerificationAdapter` implements `VerificationPort`. A completed job creates deterministic, idempotent Proposed records through the real service. Repetition does not duplicate records or dependencies.
+`RuntimeVerificationAdapter` implements `VerificationPort`. A completed job creates deterministic, idempotent Proposed records through the real service. Dependency registration is reconciled independently, so a retry repairs a verification-created/dependency-write-failed partial attempt without duplicating either side effect.
 
 `VerificationInvalidationAdapter` converts Company Brain notices into Verification's existing dependency-change event. Verification alone determines stale state and readiness.
 
@@ -49,13 +49,15 @@ Worker 2's old fixture path is only a compatibility re-export. Verification unit
 5. `fake.website.build` returns one package artifact for 271 minor units.
 6. Runtime settles 271, releases 129, and leaves zero reserved.
 7. Runtime records capability progress, completion, job completion, and `verification.requested`.
-8. The adapter creates ten Proposed records through `VerificationService`.
-9. Deterministic evidence advances customer-path records through Proposed → Executed → Tested → Verified.
-10. Readiness changes from false/false to true/false.
-11. The founder action is versioned to verified and selected admin requirements follow the same real state machine.
-12. Readiness changes to true/true.
-13. Company Brain versions the service area from 12 miles to 10 miles.
-14. Four geography-bound records become stale/Executed; readiness returns to false/false.
+8. The adapter creates fourteen Proposed records through `VerificationService`, including separate deployment, HTTPS, links, and mobile definitions.
+9. An explicit `package_ready` checkpoint proves Ready=false and Fully Set=false. All fourteen records are still Proposed, contain no evidence, and no deployment/live state is inferred.
+10. A separate deterministic **offline deployment/QA fixture phase** advances customer-path records through Proposed → Executed → Tested → Verified. Its evidence is marked `deterministic_offline_fixture`, `offline_deployment_and_qa`, and `not_live_provider_evidence`; it is not emitted by `FakeWebsiteCapability`.
+11. Every named test scenario must have a current passing result. Multi-scenario definitions cannot become Tested after only one scenario passes.
+12. Readiness changes from false/false to true/false only after that independent offline evidence phase.
+13. The founder action is versioned to verified and selected admin requirements follow the same real state machine.
+14. Readiness changes to true/true.
+15. Company Brain versions the service area from 12 miles to 10 miles.
+16. Four geography-bound records become stale/Executed; readiness returns to false/false.
 
 ## Runtime trace
 
@@ -75,6 +77,12 @@ verification.requested
 
 - Tenant/company mismatch fails closed across adapters.
 - Duplicate Runtime verification requests do not duplicate side effects.
+- Retries repair a missing Company Brain dependency after a partial adapter failure.
+- `package_ready` alone remains explicitly not Ready and not Fully Set.
+- Ready requires independent deployment, HTTPS, links, and mobile verification.
+- Offer and service-area readiness facts require explicit founder-approved decision bindings.
+- Evidence is tenant-and-company scoped, preventing same-company-ID reuse across tenants.
+- All named scenarios in multi-test definitions must pass, including on failure retest.
 - Stale Company Brain versions and invalid Verification transitions are rejected.
 - Budget ceilings and founder-only approval remain enforced.
 - Company Brain dependency invalidation propagates to Verification and readiness.
@@ -105,7 +113,7 @@ Not blocked on Phase 1E:
 - synchronous in-process event bus
 - SQLite Runtime and Company Brain repositories
 - in-memory/JSON Verification repository
-- deterministic evidence
+- deterministic offline deployment/QA evidence, explicitly labeled as non-live
 - fake website execution and spend
 - no cloud, production deployment, credentials, domains, or customer data
 

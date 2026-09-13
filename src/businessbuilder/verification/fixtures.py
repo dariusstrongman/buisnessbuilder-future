@@ -78,6 +78,7 @@ def evidence(
     evidence_id: str,
     evidence_type: EvidenceType,
     *,
+    tenant_id: str = TENANT_ID,
     company_id: str = COMPANY_ID,
     test_name: str | None = None,
     passed: bool | None = None,
@@ -88,6 +89,7 @@ def evidence(
         evidence_id=evidence_id,
         evidence_type=evidence_type,
         artifact_ref=f"artifact_{evidence_id}",
+        tenant_id=tenant_id,
         company_id=company_id,
         captured_at=FIXTURE_NOW,
         expires_at=expires_at,
@@ -117,24 +119,26 @@ def verify_definition(
     service.create(record)
     service.transition(TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED, at=FIXTURE_NOW)
     evidence_items: list[EvidenceRef] = []
-    defined_test = sorted(definition.defined_tests)[0]
-    for offset, evidence_type in enumerate(sorted(definition.required_evidence_types, key=lambda item: item.value)):
+    defined_tests = sorted(definition.defined_tests)
+    for offset, defined_test in enumerate(defined_tests):
+        evidence_items.append(
+            evidence(
+                f"evidence_{sequence:03d}_{offset:02d}",
+                EvidenceType.TEST_RESULT,
+                test_name=defined_test,
+                passed=True,
+                expires_at=FIXTURE_NOW + timedelta(days=365),
+            )
+        )
+    next_offset = len(defined_tests)
+    for offset, evidence_type in enumerate(
+        sorted(definition.required_evidence_types - {EvidenceType.TEST_RESULT}, key=lambda item: item.value),
+        next_offset,
+    ):
         evidence_items.append(
             evidence(
                 f"evidence_{sequence:03d}_{offset:02d}",
                 evidence_type,
-                test_name=defined_test if evidence_type is EvidenceType.TEST_RESULT else None,
-                passed=True if evidence_type is EvidenceType.TEST_RESULT else None,
-                expires_at=FIXTURE_NOW + timedelta(days=365),
-            )
-        )
-    if EvidenceType.TEST_RESULT not in definition.required_evidence_types:
-        evidence_items.append(
-            evidence(
-                f"evidence_{sequence:03d}_test",
-                EvidenceType.TEST_RESULT,
-                test_name=defined_test,
-                passed=True,
                 expires_at=FIXTURE_NOW + timedelta(days=365),
             )
         )
@@ -156,7 +160,11 @@ def verify_definition(
 
 
 READY_DEFINITIONS = (
+    "website.deployed",
+    "website.https",
     "website.forms",
+    "website.mobile",
+    "website.links",
     "email.inbound",
     "crm.lead_capture",
     "workflow.quote",
