@@ -6,6 +6,7 @@ import psycopg
 
 
 MIGRATION_VERSION = 1
+MIGRATION_LOCK_KEY = 1_785_369_922
 
 
 DDL = r"""
@@ -242,6 +243,23 @@ CREATE TRIGGER bb_runtime_audit_append_only
 def migrate(connection: psycopg.Connection[dict[str, Any]]) -> None:
     with connection.transaction():
         with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_KEY,)
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bb_schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cursor.execute(
+                "SELECT 1 AS applied FROM bb_schema_migrations WHERE version=%s",
+                (MIGRATION_VERSION,),
+            )
+            if cursor.fetchone() is not None:
+                return
             cursor.execute(DDL)
             cursor.execute(
                 "INSERT INTO bb_schema_migrations(version) VALUES (%s) ON CONFLICT (version) DO NOTHING",

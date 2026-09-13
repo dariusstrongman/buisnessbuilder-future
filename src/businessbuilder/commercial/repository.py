@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from copy import deepcopy
 import sqlite3
 from threading import RLock
+from typing import Iterator
 
 from businessbuilder._serialization import decode_record, encode_record
 
@@ -30,6 +33,14 @@ class CommercialConflict(RuntimeError):
 
 
 class CommercialRepository(ABC):
+    @abstractmethod
+    def transaction(self) -> Iterator[None]: ...
+
+    @abstractmethod
+    def billing_event_transaction(
+        self, provider: str, provider_event_ref: str
+    ) -> Iterator[bool]: ...
+
     @abstractmethod
     def save_product(self, product: Product, version: ProductVersion) -> None: ...
 
@@ -114,6 +125,7 @@ class InMemoryCommercialRepository(CommercialRepository):
 
     def __init__(self) -> None:
         self.lock = RLock()
+        self._transaction_depth = 0
         self.products: dict[str, Product] = {}
         self.product_versions: dict[str, ProductVersion] = {}
         self.orders: dict[tuple[str, str, str], list[Order]] = {}
@@ -125,6 +137,58 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.entitlement_grants: dict[tuple[str, str, str], list[EntitlementGrant]] = {}
         self.audit: list[object] = []
         self.processed_events: set[tuple[str, str]] = set()
+
+    _STATE_FIELDS = (
+        "products",
+        "product_versions",
+        "orders",
+        "checkouts",
+        "payments",
+        "refunds",
+        "cancellations",
+        "subscriptions",
+        "entitlement_grants",
+        "audit",
+        "processed_events",
+    )
+
+    def _snapshot_state(self) -> dict[str, object]:
+        return {name: deepcopy(getattr(self, name)) for name in self._STATE_FIELDS}
+
+    def _restore_state(self, snapshot: dict[str, object]) -> None:
+        for name, value in snapshot.items():
+            setattr(self, name, value)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self.lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            snapshot = self._snapshot_state()
+            self._transaction_depth = 1
+            try:
+                yield
+            except Exception:
+                self._restore_state(snapshot)
+                raise
+            finally:
+                self._transaction_depth = 0
+
+    @contextmanager
+    def billing_event_transaction(
+        self, provider: str, provider_event_ref: str
+    ) -> Iterator[bool]:
+        with self.transaction():
+            if self.billing_event_processed(provider, provider_event_ref):
+                yield False
+                return
+            yield True
+            self.mark_billing_event_processed(provider, provider_event_ref)
 
     def save_product(self, product: Product, version: ProductVersion) -> None:
         with self.lock:
@@ -311,6 +375,29 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
         )
         self._load_sqlite()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self.lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            snapshot = self._snapshot_state()
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._transaction_depth = 1
+            try:
+                yield
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                self._restore_state(snapshot)
+                raise
+            finally:
+                self._transaction_depth = 0
+
     def close(self) -> None:
         self.connection.close()
 
@@ -320,11 +407,17 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
 
     def _insert(self, kind: str, key: str, version: int, value: object, tenant_id: str | None = None, company_id: str | None = None, *, replace_row: bool = False) -> None:
         verb = "INSERT OR REPLACE" if replace_row else "INSERT"
-        with self.connection:
+        if self._transaction_depth:
             self.connection.execute(
                 f"{verb} INTO commercial_records VALUES (?, ?, ?, ?, ?, ?)",
                 (kind, key, version, tenant_id, company_id, encode_record(value)),
             )
+        else:
+            with self.connection:
+                self.connection.execute(
+                    f"{verb} INTO commercial_records VALUES (?, ?, ?, ?, ?, ?)",
+                    (kind, key, version, tenant_id, company_id, encode_record(value)),
+                )
 
     def _load_sqlite(self) -> None:
         for kind, key, version, body in self.connection.execute(
@@ -382,11 +475,17 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
         self._insert("entitlement", self._scope(grant.tenant_id, grant.company_id, grant.grant_id), grant.version, grant, grant.tenant_id, grant.company_id)
 
     def _append_audit_row(self, event: object) -> None:
-        with self.connection:
+        if self._transaction_depth:
             self.connection.execute(
                 "INSERT INTO commercial_audit_events VALUES (?, ?, ?, ?)",
                 (event.audit_event_id, event.tenant_id, event.company_id, encode_record(event)),
             )
+        else:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT INTO commercial_audit_events VALUES (?, ?, ?, ?)",
+                    (event.audit_event_id, event.tenant_id, event.company_id, encode_record(event)),
+                )
 
     def append_order_audit(self, event: OrderAuditEvent) -> None:
         super().append_order_audit(event); self._append_audit_row(event)
@@ -395,9 +494,28 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
         super().append_subscription_audit(event); self._append_audit_row(event)
 
     def mark_billing_event_processed(self, provider: str, provider_event_ref: str) -> None:
-        super().mark_billing_event_processed(provider, provider_event_ref)
-        with self.connection:
+        if self._transaction_depth:
             self.connection.execute(
                 "INSERT OR IGNORE INTO processed_billing_events VALUES (?, ?)",
                 (provider, provider_event_ref),
             )
+        else:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO processed_billing_events VALUES (?, ?)",
+                    (provider, provider_event_ref),
+                )
+        super().mark_billing_event_processed(provider, provider_event_ref)
+
+    def billing_event_processed(self, provider: str, provider_event_ref: str) -> bool:
+        with self.lock:
+            found = self.connection.execute(
+                """
+                SELECT 1 FROM processed_billing_events
+                WHERE provider=? AND provider_event_ref=?
+                """,
+                (provider, provider_event_ref),
+            ).fetchone()
+            if found:
+                self.processed_events.add((provider, provider_event_ref))
+            return found is not None

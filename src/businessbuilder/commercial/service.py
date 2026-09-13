@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import wraps
 from typing import Callable
 
 from businessbuilder.identity import AuthorizationContext, AuthorizationPolicy, Permission
@@ -55,6 +56,15 @@ SUPPORTED_BILLING_EVENTS = frozenset(
 )
 
 
+def _transactional(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.repository.transaction():
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class CommercialService:
     """Commercial control layer. Provider events enter only after normalization."""
 
@@ -77,6 +87,7 @@ class CommercialService:
         self.grace_duration = grace_duration
         self.automation_restriction_delay = automation_restriction_delay
 
+    @_transactional
     def create_order(
         self,
         context: AuthorizationContext,
@@ -102,6 +113,7 @@ class CommercialService:
         self._audit_order(order, context.actor_user_id, "order.created", "Customer created order")
         return order
 
+    @_transactional
     def create_checkout(
         self, context: AuthorizationContext, order_id: str, idempotency_key: str,
         *, provider_ref: str | None = None,
@@ -131,27 +143,30 @@ class CommercialService:
             raise ValueError("unsupported normalized billing event")
         if event.raw_payload is not None:
             raise ValueError("raw provider payload must not cross the billing boundary")
-        if self.repository.billing_event_processed(event.provider, event.provider_event_ref):
-            return False
+        with self.repository.billing_event_transaction(
+            event.provider, event.provider_event_ref
+        ) as should_process:
+            if not should_process:
+                return False
 
-        if event.event_type == "billing.checkout.completed":
-            self._checkout_completed(event)
-        elif event.event_type == "billing.payment.succeeded":
-            self._payment_succeeded(event)
-        elif event.event_type == "billing.payment.failed":
-            self._payment_failed(event)
-        elif event.event_type == "billing.subscription.created":
-            self._subscription_created(event)
-        elif event.event_type == "billing.subscription.updated":
-            self._subscription_updated(event)
-        elif event.event_type == "billing.subscription.canceled":
-            self._subscription_canceled(event)
-        elif event.event_type == "billing.refund.created":
-            self._refund_created(event)
+            if event.event_type == "billing.checkout.completed":
+                self._checkout_completed(event)
+            elif event.event_type == "billing.payment.succeeded":
+                self._payment_succeeded(event)
+            elif event.event_type == "billing.payment.failed":
+                self._payment_failed(event)
+            elif event.event_type == "billing.subscription.created":
+                self._subscription_created(event)
+            elif event.event_type == "billing.subscription.updated":
+                self._subscription_updated(event)
+            elif event.event_type == "billing.subscription.canceled":
+                self._subscription_canceled(event)
+            elif event.event_type == "billing.refund.created":
+                self._refund_created(event)
 
-        self.repository.mark_billing_event_processed(event.provider, event.provider_event_ref)
-        return True
+            return True
 
+    @_transactional
     def request_subscription_cancellation(
         self, context: AuthorizationContext, subscription_id: str, reason: str
     ) -> Subscription:
@@ -180,6 +195,7 @@ class CommercialService:
         self._emit("subscription.cancellation_scheduled", subscription, context.actor_user_id, {"subscription_id": subscription_id, "effective_at": subscription.billing_period.ends_at.isoformat()})
         return changed
 
+    @_transactional
     def cancel_order(
         self, context: AuthorizationContext, order_id: str,
         timing: CancellationTiming, reason: str,
@@ -210,6 +226,7 @@ class CommercialService:
         self._emit("order.canceled", changed, context.actor_user_id, {"order_id": order.order_id, "timing": timing.value})
         return changed
 
+    @_transactional
     def record_admin_override(
         self, context: AuthorizationContext, target_type: str, target_id: str,
         reason: str, metadata: dict | None = None,
@@ -226,6 +243,7 @@ class CommercialService:
             )
         )
 
+    @_transactional
     def suspend_for_security(
         self, context: AuthorizationContext, subscription_id: str, reason: str
     ) -> Subscription:
@@ -250,6 +268,7 @@ class CommercialService:
         self._emit("entitlement.operations_suspended", subscription, context.actor_user_id, {"subscription_id": subscription_id, "reason": reason})
         return changed
 
+    @_transactional
     def advance_time(self, tenant_id: str, company_id: str, *, at: datetime | None = None) -> None:
         """Offline scheduler hook for grace and period-end transitions."""
         effective_at = at or self.clock()
@@ -347,7 +366,7 @@ class CommercialService:
         self._assert_event_owner(event, order.user_id)
         if order.status is OrderStatus.PENDING_PAYMENT:
             self._transition_order(order, OrderStatus.PAYMENT_FAILED, event.provider, event.reason or "Payment failed")
-        self._emit_from_billing("order.payment_failed", event, {"order_id": order.order_id})
+            self._emit_from_billing("order.payment_failed", event, {"order_id": order.order_id})
 
     def _subscription_created(self, event: NormalizedBillingEvent) -> None:
         if not event.order_id or not event.subscription_provider_ref or not event.current_period:

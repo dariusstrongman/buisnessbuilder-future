@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import staging_server
+from businessbuilder.postgres.migrations import DDL, MIGRATION_LOCK_KEY, migrate
 
 
 class StagingServerSecurityTests(unittest.TestCase):
@@ -169,6 +170,45 @@ class DatabaseHealthSecurityTests(unittest.TestCase):
         migrate.assert_not_called()
         self.assertNotIn("CREATE", cursor.execute.call_args.args[0].upper())
         connection.close.assert_called_once_with()
+
+    def test_migration_is_locked_and_existing_version_is_a_no_op(self) -> None:
+        cursor = Mock()
+        cursor.fetchone.return_value = {"applied": 1}
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        transaction = Mock()
+        transaction.__enter__ = Mock(return_value=transaction)
+        transaction.__exit__ = Mock(return_value=False)
+        connection = Mock()
+        connection.cursor.return_value = cursor
+        connection.transaction.return_value = transaction
+
+        migrate(connection)
+
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn("pg_advisory_xact_lock", statements[0])
+        self.assertEqual((MIGRATION_LOCK_KEY,), cursor.execute.call_args_list[0].args[1])
+        self.assertNotIn(DDL, statements)
+
+    def test_new_migration_version_applies_once_inside_the_lock(self) -> None:
+        cursor = Mock()
+        cursor.fetchone.return_value = None
+        cursor.__enter__ = Mock(return_value=cursor)
+        cursor.__exit__ = Mock(return_value=False)
+        transaction = Mock()
+        transaction.__enter__ = Mock(return_value=transaction)
+        transaction.__exit__ = Mock(return_value=False)
+        connection = Mock()
+        connection.cursor.return_value = cursor
+        connection.transaction.return_value = transaction
+
+        migrate(connection)
+
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn(DDL, statements)
+        self.assertTrue(
+            any("INSERT INTO bb_schema_migrations" in item for item in statements)
+        )
 
 
 if __name__ == "__main__":

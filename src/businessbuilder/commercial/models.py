@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+import re
 from typing import Any
 
 
@@ -373,6 +374,37 @@ class NormalizedBillingEvent:
     current_period: BillingPeriod | None = None
     reason: str | None = None
     raw_payload: None = None
+
+    def __post_init__(self) -> None:
+        identifier = re.compile(r"^[a-z][a-z0-9_:-]{2,127}$")
+        for name in (
+            "event_id",
+            "tenant_id",
+            "user_id",
+            "company_id",
+            "correlation_id",
+        ):
+            if not identifier.fullmatch(getattr(self, name)):
+                raise ValueError(f"{name} must be a canonical identifier")
+        if not self.provider or len(self.provider) > 100:
+            raise ValueError("provider must contain 1 through 100 characters")
+        if not self.provider_event_ref or len(self.provider_event_ref) > 255:
+            raise ValueError(
+                "provider_event_ref must contain 1 through 255 characters"
+            )
+        for name, limit in (
+            ("order_id", 128),
+            ("checkout_intent_id", 128),
+            ("payment_provider_ref", 255),
+            ("subscription_provider_ref", 255),
+        ):
+            value = getattr(self, name)
+            if value is not None and (not value or len(value) > limit):
+                raise ValueError(f"{name} must contain 1 through {limit} characters")
+        if self.reason is not None and len(self.reason) > 2000:
+            raise ValueError("reason must not exceed 2000 characters")
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("occurred_at must be timezone-aware")
 
     def to_contract(self) -> dict[str, Any]:
         return {

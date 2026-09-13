@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from threading import RLock
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 import psycopg
 
@@ -21,6 +22,7 @@ from businessbuilder.commercial.models import (
     SubscriptionAuditEvent,
 )
 from businessbuilder.commercial.repository import (
+    CommercialConflict,
     InMemoryCommercialRepository,
     _COMMERCIAL_TYPES,
 )
@@ -222,6 +224,49 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
         )
         self._load_postgres()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self.lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            snapshot = self._snapshot_state()
+            self._transaction_depth = 1
+            try:
+                with self.connection.transaction():
+                    yield
+            except Exception:
+                self._restore_state(snapshot)
+                raise
+            finally:
+                self._transaction_depth = 0
+
+    @contextmanager
+    def billing_event_transaction(
+        self, provider: str, provider_event_ref: str
+    ) -> Iterator[bool]:
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO bb_processed_billing_events(provider, provider_event_ref)
+                    VALUES (%s, %s) ON CONFLICT DO NOTHING
+                    RETURNING provider
+                    """,
+                    (provider, provider_event_ref),
+                )
+                claimed = cursor.fetchone() is not None
+            if not claimed:
+                self.processed_events.add((provider, provider_event_ref))
+                yield False
+                return
+            yield True
+            self.processed_events.add((provider, provider_event_ref))
+
     @staticmethod
     def _scope(tenant_id: str, company_id: str, record_id: str) -> str:
         return f"{tenant_id}\x1f{company_id}\x1f{record_id}"
@@ -299,9 +344,14 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     kind, scope_key, version, tenant_id, company_id, body
                 ) VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (kind, scope_key, version) {conflict}
+                {'' if replace_row else 'RETURNING version'}
                 """,
                 (kind, key, version, tenant_id, company_id, encode_record(value)),
             )
+            if not replace_row and cursor.fetchone() is None:
+                raise CommercialConflict(
+                    f"concurrent {kind} version conflict"
+                )
 
     def save_product(self, product: Product, version: ProductVersion) -> None:
         super().save_product(product, version)
