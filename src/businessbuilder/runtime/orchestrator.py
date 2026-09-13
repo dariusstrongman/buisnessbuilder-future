@@ -220,7 +220,13 @@ class JobOrchestrator:
         provider.validate_request(request)
         estimate = provider.estimate(request)
         try:
-            self.budgets.reserve(job, estimate)
+            if job.reserved_minor:
+                if estimate.currency != job.per_job_ceiling.currency:
+                    raise BudgetExceeded("queued estimate currency changed")
+                if estimate.minor_units > job.reserved_minor:
+                    raise BudgetExceeded("queued estimate exceeds reserved budget")
+            else:
+                self.budgets.reserve(job, estimate)
         except BudgetExceeded as exc:
             job.failure = CapabilityFailure("BUDGET_EXCEEDED", str(exc), False, FailureKind.BUDGET_BLOCKED)
             self._transition(job, JobStatus.FAILED, str(exc))
@@ -310,6 +316,25 @@ class JobOrchestrator:
             correlation_id=job.correlation_id,
         )
         return job
+
+    def reserve_for_external_execution(self, job: Job) -> Money:
+        """Reserve a runnable job before durable queue publication.
+
+        The worker still owns invocation and every state transition. This method
+        only closes the budget-before-queue gap for an external execution adapter.
+        """
+        job = self.refresh(job)
+        if job.status is not JobStatus.RUNNABLE:
+            raise PermissionError("only a Runtime-runnable job may be queued")
+        if job.reserved_minor:
+            return Money(job.per_job_ceiling.currency, job.reserved_minor)
+        provider = self.registry.get(job.capability, job.capability_version)
+        request = self._request(job, job.attempts + 1)
+        provider.validate_request(request)
+        estimate = provider.estimate(request)
+        self.budgets.reserve(job, estimate)
+        self.repository.save_job(job)
+        return estimate
 
     def approve_job(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 import json
@@ -11,6 +12,17 @@ import psycopg
 from psycopg import sql
 
 from businessbuilder._serialization import decode_record, encode_record
+from businessbuilder.ai_workforce.models import (
+    AuditRecord as WorkforceAuditRecord,
+    BudgetCeiling as WorkforceBudgetCeiling,
+    CapabilityGrant as WorkforceCapabilityGrant,
+    EscalationRule as WorkforceEscalationRule,
+    PolicyDecision as WorkforcePolicyDecision,
+    PolicyEvaluation as WorkforcePolicyEvaluation,
+    RoleDefinition as WorkforceRoleDefinition,
+    RoleState as WorkforceRoleState,
+)
+from businessbuilder.ai_workforce.repository import InMemoryWorkforceRepository
 from businessbuilder.commercial.models import (
     CancellationRecord,
     CheckoutIntent,
@@ -661,9 +673,27 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
 
     def __init__(self, dsn: str | None = None, *, schema: str | None = None) -> None:
         self._lock = RLock()
+        self._transaction_depth = 0
         _PostgresRepository.__init__(
             self, dsn, schema=schema, application_name="businessbuilder-runtime"
         )
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            self._transaction_depth = 1
+            try:
+                with self.connection.transaction():
+                    yield
+            finally:
+                self._transaction_depth = 0
 
     def append_event(self, event: Event) -> bool:
         with self._lock, self.connection.cursor() as cursor:
@@ -961,6 +991,195 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
             )
             return [decode(row["body"]) for row in cursor]
 
+    @staticmethod
+    def _agent_envelope(value: str):
+        from businessbuilder.agent_runtime.models import AgentJobEnvelope
+        return AgentJobEnvelope.from_payload(decode(value))
+
+    @staticmethod
+    def _agent_execution(value: str):
+        from businessbuilder.agent_runtime.models import ExecutionRecord, ExecutionState
+        from businessbuilder.runtime.models import ArtifactRef, Money
+        data = decode(value)
+        data["state"] = ExecutionState(data["state"])
+        data["actual_cost"] = Money(**data["actual_cost"]) if data.get("actual_cost") else None
+        data["artifact_refs"] = tuple(ArtifactRef(**item) for item in data.get("artifact_refs", ()))
+        data["emitted_event_ids"] = tuple(data.get("emitted_event_ids", ()))
+        return ExecutionRecord(**data)
+
+    @staticmethod
+    def _agent_outbox(row):
+        from businessbuilder.agent_runtime.models import DeliveryState, QueueOutboxRecord
+        return QueueOutboxRecord(
+            row["message_id"], row["idempotency_key"], row["tenant_id"],
+            row["company_id"], row["job_id"], row["envelope_digest"],
+            DeliveryState(row["state"]), row["attempts"], row["available_at"],
+            row["created_at"], row["claimed_by"], row["claimed_until"],
+            row["acknowledged_at"], row["last_error"],
+        )
+
+    def save_agent_admission(self, envelope, execution, outbox) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_runtime_agent_job_envelopes(
+                job_id, tenant_id, company_id, envelope_digest, body
+                ) VALUES (%s, %s, %s, %s, %s)""",
+                (envelope.job_id, envelope.tenant_id, envelope.company_id, envelope.envelope_digest, encode(envelope.to_payload())),
+            )
+            cursor.execute(
+                """INSERT INTO bb_runtime_agent_executions(
+                job_id, tenant_id, company_id, state, lease_owner, lease_until, body
+                ) VALUES (%s, %s, %s, %s, NULL, NULL, %s)""",
+                (execution.job_id, execution.tenant_id, execution.company_id, execution.state.value, encode(execution)),
+            )
+            cursor.execute(
+                """INSERT INTO bb_runtime_agent_queue_outbox(
+                message_id, idempotency_key, tenant_id, company_id, job_id,
+                envelope_digest, state, attempts, available_at, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (outbox.message_id, outbox.idempotency_key, outbox.tenant_id, outbox.company_id, outbox.job_id, outbox.envelope_digest, outbox.state.value, outbox.attempts, outbox.available_at, outbox.created_at),
+            )
+
+    def get_agent_envelope(self, tenant_id: str, company_id: str, job_id: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_agent_job_envelopes WHERE tenant_id=%s AND company_id=%s AND job_id=%s",
+                (tenant_id, company_id, job_id),
+            )
+            row = cursor.fetchone()
+        return self._agent_envelope(row["body"]) if row else None
+
+    def get_agent_execution(self, tenant_id: str, company_id: str, job_id: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_agent_executions WHERE tenant_id=%s AND company_id=%s AND job_id=%s",
+                (tenant_id, company_id, job_id),
+            )
+            row = cursor.fetchone()
+        return self._agent_execution(row["body"]) if row else None
+
+    def list_agent_executions(self, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_agent_executions WHERE tenant_id=%s AND company_id=%s ORDER BY job_id",
+                (tenant_id, company_id),
+            )
+            return tuple(self._agent_execution(row["body"]) for row in cursor)
+
+    def save_agent_execution(self, execution) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE bb_runtime_agent_executions
+                SET state=%s, lease_owner=%s, lease_until=%s, body=%s
+                WHERE tenant_id=%s AND company_id=%s AND job_id=%s""",
+                (execution.state.value, execution.lease_owner, execution.lease_until, encode(execution), execution.tenant_id, execution.company_id, execution.job_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("agent execution not found in tenant/company scope")
+
+    def lease_agent_execution(self, tenant_id, company_id, job_id, envelope_digest, worker_id, *, at, lease):
+        from businessbuilder.agent_runtime.models import ExecutionState
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT body FROM bb_runtime_agent_executions
+                    WHERE tenant_id=%s AND company_id=%s AND job_id=%s FOR UPDATE""",
+                    (tenant_id, company_id, job_id),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return None
+            current = self._agent_execution(row["body"])
+            if current.envelope_digest != envelope_digest:
+                return None
+            if current.state in {ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED}:
+                return None
+            if current.state is ExecutionState.LEASED and current.lease_until and current.lease_until > at:
+                return None
+            changed = replace(
+                current, state=ExecutionState.LEASED, attempts=current.attempts + 1,
+                updated_at=at, lease_owner=worker_id, lease_until=at + lease,
+            )
+            self.save_agent_execution(changed)
+            return changed
+
+    def claim_agent_outbox(self, dispatcher_id, *, at, lease, limit):
+        if not dispatcher_id or limit < 1 or lease <= timedelta(0):
+            raise ValueError("dispatcher, positive lease, and positive limit required")
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """WITH candidates AS (
+                        SELECT message_id FROM bb_runtime_agent_queue_outbox
+                        WHERE (state='pending' AND available_at<=%s)
+                           OR (state='dispatching' AND claimed_until<=%s)
+                        ORDER BY sequence FOR UPDATE SKIP LOCKED LIMIT %s
+                    )
+                    UPDATE bb_runtime_agent_queue_outbox outbox
+                    SET state='dispatching', attempts=outbox.attempts+1,
+                        claimed_by=%s, claimed_until=%s
+                    FROM candidates WHERE outbox.message_id=candidates.message_id
+                    RETURNING outbox.*""",
+                    (at, at, limit, dispatcher_id, at + lease),
+                )
+                return tuple(self._agent_outbox(row) for row in cursor)
+
+    def acknowledge_agent_outbox(self, message_id, dispatcher_id, *, at):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE bb_runtime_agent_queue_outbox SET state='acknowledged',
+                acknowledged_at=%s, claimed_by=NULL, claimed_until=NULL
+                WHERE message_id=%s AND state='dispatching' AND claimed_by=%s""",
+                (at, message_id, dispatcher_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("outbox acknowledgment claim mismatch")
+
+    def release_agent_outbox(self, message_id, dispatcher_id, *, retry_at, error):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE bb_runtime_agent_queue_outbox SET state='pending',
+                available_at=%s, claimed_by=NULL, claimed_until=NULL, last_error=%s
+                WHERE message_id=%s AND state='dispatching' AND claimed_by=%s""",
+                (retry_at, error[:200], message_id, dispatcher_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("outbox release claim mismatch")
+
+    @staticmethod
+    def _runtime_schedule(value: str):
+        from businessbuilder.agent_runtime.models import RuntimeSchedule
+        return RuntimeSchedule(**decode(value))
+
+    def save_runtime_schedule(self, schedule) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_runtime_schedules(
+                schedule_id, tenant_id, company_id, next_due_at, enabled, body
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(schedule_id) DO UPDATE SET next_due_at=EXCLUDED.next_due_at,
+                enabled=EXCLUDED.enabled, body=EXCLUDED.body""",
+                (schedule.schedule_id, schedule.tenant_id, schedule.company_id, schedule.next_due_at, schedule.enabled, encode(schedule)),
+            )
+
+    def get_runtime_schedule(self, tenant_id: str, company_id: str, schedule_id: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_runtime_schedules WHERE tenant_id=%s AND company_id=%s AND schedule_id=%s",
+                (tenant_id, company_id, schedule_id),
+            )
+            row = cursor.fetchone()
+        return self._runtime_schedule(row["body"]) if row else None
+
+    def list_due_runtime_schedules(self, *, at: datetime, limit: int) -> tuple[Any, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_runtime_schedules
+                WHERE enabled AND next_due_at<=%s ORDER BY next_due_at, schedule_id LIMIT %s""",
+                (at, limit),
+            )
+            return tuple(self._runtime_schedule(row["body"]) for row in cursor)
+
 
 class PostgresVerificationRepository(VerificationRepository, _PostgresRepository):
     """Append-versioned PostgreSQL store for Verification-owned readiness evidence."""
@@ -1034,6 +1253,125 @@ class PostgresVerificationRepository(VerificationRepository, _PostgresRepository
             )
             return tuple(
                 VerificationRecord.from_dict(json.loads(row["body"])) for row in cursor
+            )
+
+
+_WORKFORCE_TYPES = {
+    item.__name__: item
+    for item in (
+        WorkforceAuditRecord,
+        WorkforceBudgetCeiling,
+        WorkforceCapabilityGrant,
+        WorkforceEscalationRule,
+        WorkforcePolicyDecision,
+        WorkforcePolicyEvaluation,
+        WorkforceRoleDefinition,
+        WorkforceRoleState,
+    )
+}
+
+
+class PostgresWorkforceRepository(InMemoryWorkforceRepository, _PostgresRepository):
+    """AI Workforce policy persistence in the existing PostgreSQL schema."""
+
+    def __init__(self, dsn: str | None = None, *, schema: str | None = None) -> None:
+        InMemoryWorkforceRepository.__init__(self)
+        _PostgresRepository.__init__(
+            self, dsn, schema=schema, application_name="businessbuilder-ai-workforce"
+        )
+        self._load_postgres()
+
+    @staticmethod
+    def _scope(*parts: object) -> str:
+        return "\x1f".join(str(item) for item in parts)
+
+    def _put(self, kind: str, key: str, tenant_id: str, company_id: str, value: object) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_ai_workforce_records(kind, scope_key, tenant_id, company_id, body)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (kind, scope_key) DO UPDATE SET body=EXCLUDED.body""",
+                (kind, key, tenant_id, company_id, encode_record(value)),
+            )
+
+    def _load_postgres(self) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT kind, scope_key, body FROM bb_ai_workforce_records ORDER BY kind, scope_key"
+            )
+            for row in cursor:
+                kind = row["kind"]
+                parts = row["scope_key"].split("\x1f")
+                if kind == "role":
+                    value = decode_record(row["body"], _WORKFORCE_TYPES)
+                    self._definitions[(value.tenant_id, value.company_id, value.role_id, value.version)] = value
+                elif kind == "current":
+                    self._current[(parts[0], parts[1], parts[2])] = int(
+                        decode_record(row["body"], _WORKFORCE_TYPES)
+                    )
+                elif kind == "evaluation":
+                    value = decode_record(row["body"], _WORKFORCE_TYPES)
+                    self._evaluations[(parts[0], parts[1], parts[2])] = value
+                elif kind == "command":
+                    value = decode_record(row["body"], _WORKFORCE_TYPES)
+                    self._commands[(parts[0], parts[1], parts[2])] = (
+                        value["digest"], value["result"]
+                    )
+            cursor.execute("SELECT body FROM bb_ai_workforce_audit_events ORDER BY sequence")
+            self._audit.extend(
+                decode_record(row["body"], _WORKFORCE_TYPES) for row in cursor
+            )
+
+    def add_definition(self, definition: WorkforceRoleDefinition, *, make_current: bool = True) -> None:
+        super().add_definition(definition, make_current=make_current)
+        with self.connection.transaction():
+            self._put(
+                "role",
+                self._scope(definition.tenant_id, definition.company_id, definition.role_id, definition.version),
+                definition.tenant_id, definition.company_id, definition,
+            )
+            if make_current:
+                self._put(
+                    "current",
+                    self._scope(definition.tenant_id, definition.company_id, definition.role_id),
+                    definition.tenant_id, definition.company_id, definition.version,
+                )
+
+    def replace_definition(self, definition: WorkforceRoleDefinition) -> None:
+        super().replace_definition(definition)
+        self._put(
+            "role",
+            self._scope(definition.tenant_id, definition.company_id, definition.role_id, definition.version),
+            definition.tenant_id, definition.company_id, definition,
+        )
+
+    def save_evaluation(self, idempotency_key: str, evaluation: WorkforcePolicyEvaluation) -> WorkforcePolicyEvaluation:
+        value = super().save_evaluation(idempotency_key, evaluation)
+        self._put(
+            "evaluation",
+            self._scope(evaluation.tenant_id, evaluation.company_id, idempotency_key),
+            evaluation.tenant_id, evaluation.company_id, value,
+        )
+        return value
+
+    def save_command(self, tenant_id, company_id, idempotency_key, command_digest, result):
+        value = super().save_command(
+            tenant_id, company_id, idempotency_key, command_digest, result
+        )
+        self._put(
+            "command", self._scope(tenant_id, company_id, idempotency_key),
+            tenant_id, company_id, {"digest": command_digest, "result": value},
+        )
+        return value
+
+    def append_audit(self, record: WorkforceAuditRecord) -> None:
+        super().append_audit(record)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_ai_workforce_audit_events(
+                audit_id, tenant_id, company_id, body
+                ) VALUES (%s, %s, %s, %s)""",
+                (record.audit_id, record.tenant_id, record.company_id, encode_record(record)),
             )
 
 

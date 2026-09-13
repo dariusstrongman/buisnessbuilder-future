@@ -7,6 +7,7 @@ from .repositories import (
     PostgresIdentityRepository,
     PostgresRuntimeRepository,
     PostgresVerificationRepository,
+    PostgresWorkforceRepository,
 )
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "PostgresIdentityRepository",
     "PostgresRuntimeRepository",
     "PostgresVerificationRepository",
+    "PostgresWorkforceRepository",
     "connect_postgres",
 ]

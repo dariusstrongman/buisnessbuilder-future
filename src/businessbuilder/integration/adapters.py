@@ -201,6 +201,8 @@ class RuntimeVerificationAdapter:
         artifact_refs: list[dict[str, Any]],
         correlation_id: str,
     ) -> None:
+        if not self.definition_ids:
+            return
         snapshot = self.company_snapshots.get_snapshot(tenant_id, company_id)
         dependency = self.company_snapshots.dependency(tenant_id, company_id, self.dependency_id)
         target_id = artifact_refs[0]["id"] if artifact_refs else job_id

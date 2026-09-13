@@ -30,6 +30,7 @@ class AuditLog:
         approval_id: str | None = None,
         permission: str | None = None,
         source: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         value = {
             "schema_version": "audit-event.v1",
@@ -54,6 +55,8 @@ class AuditLog:
             value["permission"] = permission
         if source is not None:
             value["source"] = source
+        if details is not None:
+            value["details"] = details
         self.repository.append_audit(value)
         return value
 
@@ -63,5 +66,5 @@ def to_audit_contract(record: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in record.items()
-        if key not in {"tenant_id", "permission", "source"}
+        if key not in {"tenant_id", "permission", "source", "details"}
     }

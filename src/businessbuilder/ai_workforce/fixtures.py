@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from .models import BudgetCeiling, CapabilityGrant, EscalationRule, ManagementAuthorityProof, RoleDefinition
@@ -114,6 +115,21 @@ def billy_bob_roles() -> tuple[RoleDefinition, ...]:
             budget=BudgetCeiling("USD", per_action_minor=5, period_minor=100),
             created_at=FIXED_NOW,
         ),
+    )
+
+
+def safe_role_definitions(
+    tenant_id: str, company_id: str, *, created_at: datetime
+) -> tuple[RoleDefinition, ...]:
+    """Return the existing four safe roles scoped to one customer company."""
+    return tuple(
+        replace(
+            role,
+            tenant_id=tenant_id,
+            company_id=company_id,
+            created_at=created_at,
+        )
+        for role in billy_bob_roles()
     )
 
 

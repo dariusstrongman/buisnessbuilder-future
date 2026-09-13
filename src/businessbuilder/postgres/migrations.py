@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 2
+MIGRATION_VERSION = 3
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -138,6 +138,73 @@ CREATE TABLE IF NOT EXISTS bb_runtime_audit_events (
     occurred_at TIMESTAMPTZ NOT NULL,
     body TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bb_runtime_agent_job_envelopes (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_agent_job_scope
+    ON bb_runtime_agent_job_envelopes (tenant_id, company_id, job_id);
+CREATE TABLE IF NOT EXISTS bb_runtime_agent_executions (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'leased', 'retryable', 'succeeded', 'failed', 'cancelled')),
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_agent_execution_scope
+    ON bb_runtime_agent_executions (tenant_id, company_id, state);
+CREATE TABLE IF NOT EXISTS bb_runtime_agent_queue_outbox (
+    sequence BIGSERIAL UNIQUE,
+    message_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'dispatching', 'acknowledged')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    available_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    claimed_by TEXT,
+    claimed_until TIMESTAMPTZ,
+    acknowledged_at TIMESTAMPTZ,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_agent_queue_dispatch
+    ON bb_runtime_agent_queue_outbox (state, available_at, sequence);
+CREATE TABLE IF NOT EXISTS bb_runtime_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    next_due_at TIMESTAMPTZ NOT NULL,
+    enabled BOOLEAN NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_schedules_due
+    ON bb_runtime_schedules (enabled, next_due_at);
+
+CREATE TABLE IF NOT EXISTS bb_ai_workforce_records (
+    kind TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (kind, scope_key)
+);
+CREATE INDEX IF NOT EXISTS bb_ai_workforce_scope
+    ON bb_ai_workforce_records (tenant_id, company_id, kind);
+CREATE TABLE IF NOT EXISTS bb_ai_workforce_audit_events (
+    sequence BIGSERIAL UNIQUE,
+    audit_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    body TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS bb_companies (
     tenant_id TEXT NOT NULL,
@@ -255,6 +322,10 @@ CREATE TRIGGER bb_commercial_audit_append_only
 DROP TRIGGER IF EXISTS bb_runtime_audit_append_only ON bb_runtime_audit_events;
 CREATE TRIGGER bb_runtime_audit_append_only
     BEFORE UPDATE OR DELETE ON bb_runtime_audit_events
+    FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
+DROP TRIGGER IF EXISTS bb_ai_workforce_audit_append_only ON bb_ai_workforce_audit_events;
+CREATE TRIGGER bb_ai_workforce_audit_append_only
+    BEFORE UPDATE OR DELETE ON bb_ai_workforce_audit_events
     FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
 """
 

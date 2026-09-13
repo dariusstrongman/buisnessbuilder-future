@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from enum import Enum
 import json
 import sqlite3
 from threading import RLock
-from typing import Any
+from typing import Any, Iterator
 
 from .models import ApprovalRecord, Budget, Event, Job
 
@@ -37,6 +38,9 @@ def decode(value: str) -> Any:
 
 
 class RuntimeRepository(ABC):
+    @abstractmethod
+    def transaction(self) -> Iterator[None]: ...
+
     @abstractmethod
     def append_event(self, event: Event) -> bool: ...
 
@@ -87,6 +91,42 @@ class RuntimeRepository(ABC):
     @abstractmethod
     def invocation(self, tenant_id: str, company_id: str, key: str) -> dict[str, Any] | None: ...
 
+    @abstractmethod
+    def save_agent_admission(self, envelope: Any, execution: Any, outbox: Any) -> None: ...
+
+    @abstractmethod
+    def get_agent_envelope(self, tenant_id: str, company_id: str, job_id: str) -> Any: ...
+
+    @abstractmethod
+    def get_agent_execution(self, tenant_id: str, company_id: str, job_id: str) -> Any: ...
+
+    @abstractmethod
+    def list_agent_executions(self, tenant_id: str, company_id: str) -> tuple[Any, ...]: ...
+
+    @abstractmethod
+    def save_agent_execution(self, execution: Any) -> None: ...
+
+    @abstractmethod
+    def lease_agent_execution(self, tenant_id: str, company_id: str, job_id: str, envelope_digest: str, worker_id: str, *, at: datetime, lease: timedelta) -> Any: ...
+
+    @abstractmethod
+    def claim_agent_outbox(self, dispatcher_id: str, *, at: datetime, lease: timedelta, limit: int) -> tuple[Any, ...]: ...
+
+    @abstractmethod
+    def acknowledge_agent_outbox(self, message_id: str, dispatcher_id: str, *, at: datetime) -> Any: ...
+
+    @abstractmethod
+    def release_agent_outbox(self, message_id: str, dispatcher_id: str, *, retry_at: datetime, error: str) -> Any: ...
+
+    @abstractmethod
+    def save_runtime_schedule(self, schedule: Any) -> None: ...
+
+    @abstractmethod
+    def get_runtime_schedule(self, tenant_id: str, company_id: str, schedule_id: str) -> Any: ...
+
+    @abstractmethod
+    def list_due_runtime_schedules(self, *, at: datetime, limit: int) -> tuple[Any, ...]: ...
+
 
 class SQLiteRuntimeRepository(RuntimeRepository):
     """SQLite adapter. Orchestration depends only on repository methods, not SQL."""
@@ -97,6 +137,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self._lock = RLock()
+        self._transaction_depth = 0
         self._migrate()
 
     def close(self) -> None:
@@ -177,6 +218,48 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                 BEFORE DELETE ON audit_events BEGIN
                     SELECT RAISE(ABORT, 'audit log is append-only');
                 END;
+                CREATE TABLE IF NOT EXISTS agent_job_envelopes (
+                    job_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    envelope_digest TEXT NOT NULL,
+                    body TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_execution_records (
+                    job_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    lease_owner TEXT,
+                    lease_until TEXT,
+                    body TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_queue_outbox (
+                    message_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    envelope_digest TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    available_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    claimed_by TEXT,
+                    claimed_until TEXT,
+                    acknowledged_at TEXT,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS agent_queue_outbox_dispatch
+                    ON agent_queue_outbox(state, available_at, message_id);
+                CREATE TABLE IF NOT EXISTS runtime_schedules (
+                    schedule_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    next_due_at TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    body TEXT NOT NULL
+                );
                 """
             )
             self.connection.execute(
@@ -184,8 +267,37 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                 (self.MIGRATION_VERSION,),
             )
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self._lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            self._transaction_depth = 1
+            try:
+                self.connection.execute("BEGIN")
+                yield
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                self._transaction_depth = 0
+
+    @contextmanager
+    def _write(self) -> Iterator[None]:
+        if self._transaction_depth:
+            yield
+        else:
+            with self.connection:
+                yield
+
     def append_event(self, event: Event) -> bool:
-        with self._lock, self.connection:
+        with self._lock, self._write():
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -207,7 +319,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         return [decode(row["body"]) for row in rows]
 
     def save_job(self, job: Job) -> None:
-        with self._lock, self.connection:
+        with self._lock, self._write():
             self.connection.execute(
                 """INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET status=excluded.status, body=excluded.body""",
@@ -251,7 +363,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         return Job(**data)
 
     def save_approval(self, approval: ApprovalRecord) -> None:
-        with self.connection:
+        with self._write():
             self.connection.execute(
                 """INSERT INTO approvals VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(approval_id) DO UPDATE SET body=excluded.body""",
@@ -286,7 +398,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         return tuple(values)
 
     def save_budget(self, budget: Budget) -> None:
-        with self.connection:
+        with self._write():
             self.connection.execute(
                 """INSERT INTO budgets VALUES (?, ?, ?, ?)
                 ON CONFLICT(budget_id) DO UPDATE SET body=excluded.body""",
@@ -321,7 +433,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
     def save_reservation(
         self, job: Job, budget_id: str, currency: str, reserved_minor: int, settled_minor: int, state: str
     ) -> None:
-        with self.connection:
+        with self._write():
             self.connection.execute(
                 """INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET reserved_minor=excluded.reserved_minor,
@@ -330,7 +442,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
             )
 
     def begin_invocation(self, tenant_id: str, company_id: str, key: str, job_id: str) -> bool:
-        with self.connection:
+        with self._write():
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO capability_invocations VALUES (?, ?, ?, ?, 'started', NULL)",
                 (tenant_id, company_id, key, job_id),
@@ -338,7 +450,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         return cursor.rowcount == 1
 
     def complete_invocation(self, tenant_id: str, company_id: str, key: str, result: Any) -> None:
-        with self.connection:
+        with self._write():
             self.connection.execute(
                 "UPDATE capability_invocations SET state='completed', result=? WHERE tenant_id=? AND company_id=? AND idempotency_key=?",
                 (encode(result), tenant_id, company_id, key),
@@ -352,7 +464,7 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         return dict(row) if row else None
 
     def append_audit(self, record: dict[str, Any]) -> None:
-        with self.connection:
+        with self._write():
             self.connection.execute(
                 "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?)",
                 (
@@ -370,3 +482,160 @@ class SQLiteRuntimeRepository(RuntimeRepository):
             (tenant_id, company_id),
         ).fetchall()
         return [decode(row["body"]) for row in rows]
+
+    @staticmethod
+    def _agent_envelope(value: str):
+        from businessbuilder.agent_runtime.models import AgentJobEnvelope
+        return AgentJobEnvelope.from_payload(decode(value))
+
+    @staticmethod
+    def _agent_execution(value: str):
+        from businessbuilder.agent_runtime.models import ExecutionRecord, ExecutionState
+        from .models import ArtifactRef, Money
+        data = decode(value)
+        data["state"] = ExecutionState(data["state"])
+        data["actual_cost"] = Money(**data["actual_cost"]) if data.get("actual_cost") else None
+        data["artifact_refs"] = tuple(ArtifactRef(**item) for item in data.get("artifact_refs", ()))
+        data["emitted_event_ids"] = tuple(data.get("emitted_event_ids", ()))
+        return ExecutionRecord(**data)
+
+    @staticmethod
+    def _agent_outbox(row):
+        from businessbuilder.agent_runtime.models import DeliveryState, QueueOutboxRecord
+        return QueueOutboxRecord(
+            row["message_id"], row["idempotency_key"], row["tenant_id"],
+            row["company_id"], row["job_id"], row["envelope_digest"],
+            DeliveryState(row["state"]), row["attempts"],
+            datetime.fromisoformat(row["available_at"]), datetime.fromisoformat(row["created_at"]),
+            row["claimed_by"], datetime.fromisoformat(row["claimed_until"]) if row["claimed_until"] else None,
+            datetime.fromisoformat(row["acknowledged_at"]) if row["acknowledged_at"] else None,
+            row["last_error"],
+        )
+
+    def save_agent_admission(self, envelope, execution, outbox) -> None:
+        with self._write():
+            self.connection.execute(
+                "INSERT INTO agent_job_envelopes VALUES (?, ?, ?, ?, ?)",
+                (envelope.job_id, envelope.tenant_id, envelope.company_id, envelope.envelope_digest, encode(envelope.to_payload())),
+            )
+            self.connection.execute(
+                "INSERT INTO agent_execution_records VALUES (?, ?, ?, ?, NULL, NULL, ?)",
+                (execution.job_id, execution.tenant_id, execution.company_id, execution.state.value, encode(execution)),
+            )
+            self.connection.execute(
+                "INSERT INTO agent_queue_outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+                (outbox.message_id, outbox.idempotency_key, outbox.tenant_id, outbox.company_id, outbox.job_id, outbox.envelope_digest, outbox.state.value, outbox.attempts, outbox.available_at.isoformat(), outbox.created_at.isoformat()),
+            )
+
+    def get_agent_envelope(self, tenant_id: str, company_id: str, job_id: str):
+        row = self.connection.execute(
+            "SELECT body FROM agent_job_envelopes WHERE tenant_id=? AND company_id=? AND job_id=?",
+            (tenant_id, company_id, job_id),
+        ).fetchone()
+        return self._agent_envelope(row["body"]) if row else None
+
+    def get_agent_execution(self, tenant_id: str, company_id: str, job_id: str):
+        row = self.connection.execute(
+            "SELECT body FROM agent_execution_records WHERE tenant_id=? AND company_id=? AND job_id=?",
+            (tenant_id, company_id, job_id),
+        ).fetchone()
+        return self._agent_execution(row["body"]) if row else None
+
+    def list_agent_executions(self, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM agent_execution_records WHERE tenant_id=? AND company_id=? ORDER BY job_id",
+            (tenant_id, company_id),
+        ).fetchall()
+        return tuple(self._agent_execution(row["body"]) for row in rows)
+
+    def save_agent_execution(self, execution) -> None:
+        with self._write():
+            self.connection.execute(
+                """UPDATE agent_execution_records SET state=?, lease_owner=?, lease_until=?, body=?
+                WHERE tenant_id=? AND company_id=? AND job_id=?""",
+                (execution.state.value, execution.lease_owner, execution.lease_until.isoformat() if execution.lease_until else None, encode(execution), execution.tenant_id, execution.company_id, execution.job_id),
+            )
+
+    def lease_agent_execution(self, tenant_id, company_id, job_id, envelope_digest, worker_id, *, at, lease):
+        from businessbuilder.agent_runtime.models import ExecutionState
+        with self.transaction():
+            current = self.get_agent_execution(tenant_id, company_id, job_id)
+            if current is None or current.envelope_digest != envelope_digest:
+                return None
+            if current.state in {ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.CANCELLED}:
+                return None
+            if current.state is ExecutionState.LEASED and current.lease_until and current.lease_until > at:
+                return None
+            changed = __import__("dataclasses").replace(
+                current, state=ExecutionState.LEASED, attempts=current.attempts + 1,
+                updated_at=at, lease_owner=worker_id, lease_until=at + lease,
+            )
+            self.save_agent_execution(changed)
+            return changed
+
+    def claim_agent_outbox(self, dispatcher_id, *, at, lease, limit):
+        from businessbuilder.agent_runtime.models import DeliveryState
+        claimed = []
+        with self.transaction():
+            rows = self.connection.execute(
+                """SELECT * FROM agent_queue_outbox WHERE
+                (state='pending' AND available_at<=?) OR
+                (state='dispatching' AND claimed_until<=?)
+                ORDER BY message_id LIMIT ?""", (at.isoformat(), at.isoformat(), limit),
+            ).fetchall()
+            for row in rows:
+                self.connection.execute(
+                    "UPDATE agent_queue_outbox SET state='dispatching', attempts=attempts+1, claimed_by=?, claimed_until=? WHERE message_id=?",
+                    (dispatcher_id, (at + lease).isoformat(), row["message_id"]),
+                )
+                refreshed = self.connection.execute("SELECT * FROM agent_queue_outbox WHERE message_id=?", (row["message_id"],)).fetchone()
+                claimed.append(self._agent_outbox(refreshed))
+        return tuple(claimed)
+
+    def acknowledge_agent_outbox(self, message_id, dispatcher_id, *, at):
+        with self._write():
+            cursor = self.connection.execute(
+                """UPDATE agent_queue_outbox SET state='acknowledged', acknowledged_at=?, claimed_by=NULL, claimed_until=NULL
+                WHERE message_id=? AND state='dispatching' AND claimed_by=?""",
+                (at.isoformat(), message_id, dispatcher_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("outbox acknowledgment claim mismatch")
+
+    def release_agent_outbox(self, message_id, dispatcher_id, *, retry_at, error):
+        with self._write():
+            cursor = self.connection.execute(
+                """UPDATE agent_queue_outbox SET state='pending', available_at=?, claimed_by=NULL, claimed_until=NULL, last_error=?
+                WHERE message_id=? AND state='dispatching' AND claimed_by=?""",
+                (retry_at.isoformat(), error[:200], message_id, dispatcher_id),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("outbox release claim mismatch")
+
+    @staticmethod
+    def _runtime_schedule(value: str):
+        from businessbuilder.agent_runtime.models import RuntimeSchedule
+        return RuntimeSchedule(**decode(value))
+
+    def save_runtime_schedule(self, schedule) -> None:
+        with self._write():
+            self.connection.execute(
+                """INSERT INTO runtime_schedules VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(schedule_id) DO UPDATE SET next_due_at=excluded.next_due_at,
+                enabled=excluded.enabled, body=excluded.body""",
+                (schedule.schedule_id, schedule.tenant_id, schedule.company_id, schedule.next_due_at.isoformat(), int(schedule.enabled), encode(schedule)),
+            )
+
+    def get_runtime_schedule(self, tenant_id: str, company_id: str, schedule_id: str):
+        row = self.connection.execute(
+            "SELECT body FROM runtime_schedules WHERE tenant_id=? AND company_id=? AND schedule_id=?",
+            (tenant_id, company_id, schedule_id),
+        ).fetchone()
+        return self._runtime_schedule(row["body"]) if row else None
+
+    def list_due_runtime_schedules(self, *, at: datetime, limit: int) -> tuple[Any, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM runtime_schedules WHERE enabled=1 AND next_due_at<=? ORDER BY next_due_at, schedule_id LIMIT ?",
+            (at.isoformat(), limit),
+        ).fetchall()
+        return tuple(self._runtime_schedule(row["body"]) for row in rows)
