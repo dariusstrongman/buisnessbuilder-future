@@ -1,15 +1,123 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Company Build Room — Billy Bob</title>
-<style>
-:root{--ink:#172019;--muted:#667067;--paper:#f3f0e9;--panel:#fffdf8;--line:#d9d4c9;--forest:#173f2a;--sage:#dbe6d8;--amber:#c68839;--rust:#9b4335;--shadow:0 18px 48px rgba(28,35,29,.10)}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}button{font:inherit}button:focus-visible{outline:3px solid #e1a44f;outline-offset:2px}.shell{min-height:100vh;display:grid;grid-template-columns:245px 1fr}.side{background:var(--forest);color:#f7f4eb;padding:28px 20px;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}.mark{font:600 18px Georgia,serif;letter-spacing:.02em}.case{font-size:12px;color:#b9c9bd;margin:7px 0 30px}.nav{display:grid;gap:5px}.nav button{border:0;background:transparent;color:#cbd6ce;text-align:left;padding:11px 12px;border-radius:8px;cursor:pointer}.nav button.active{background:#f4f0e7;color:#173f2a}.ownership{margin-top:auto;border-top:1px solid #42634d;padding-top:18px;font-size:12px;color:#cbd6ce}.main{padding:32px 42px 70px;max-width:1280px;width:100%;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:34px}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}h1,h2,h3{font-family:Georgia,serif;font-weight:500;margin:0}h1{font-size:44px;line-height:1.08;max-width:760px}h2{font-size:30px}.sub{color:var(--muted);max-width:720px}.pill{display:inline-flex;gap:7px;align-items:center;padding:6px 10px;border:1px solid var(--line);border-radius:99px;background:var(--panel);font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:#3b8152}.screen{display:none}.screen.active{display:block}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:28px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:0 6px 20px rgba(28,35,29,.04)}.card.selected{border:2px solid var(--forest);padding:21px}.price{font:500 27px Georgia,serif;margin:18px 0 6px}.small{font-size:12px;color:var(--muted)}ul.clean{padding-left:18px;color:#49524b;min-height:118px}.btn{border:1px solid var(--line);background:var(--panel);padding:11px 15px;border-radius:8px;cursor:pointer;color:var(--ink)}.btn.primary{background:var(--forest);color:#fff;border-color:var(--forest)}.btn.danger{color:var(--rust)}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}.intake{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:24px}.field{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:15px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:7px}.field input,.field select{width:100%;border:0;background:transparent;font:inherit;color:var(--ink);outline:0}.callout{background:#e8ede4;border-left:3px solid var(--forest);padding:18px 20px;margin:24px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.recommend{border-top:4px solid var(--forest)}.warn{border-top:4px solid var(--amber)}.roomhead{display:flex;justify-content:space-between;gap:20px;align-items:flex-end}.progress{height:7px;background:#dfdbd1;border-radius:99px;overflow:hidden;margin:18px 0 28px}.progress span{display:block;height:100%;width:63%;background:var(--forest)}.buildgrid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.timeline{display:grid;gap:10px}.task{display:grid;grid-template-columns:32px 1fr auto;gap:12px;align-items:start;padding:16px;border-bottom:1px solid var(--line);background:var(--panel)}.task:first-child{border-radius:12px 12px 0 0}.task:last-child{border-radius:0 0 12px 12px;border:0}.icon{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--sage);font-size:12px}.icon.block{background:#f2dfc6}.task b{display:block}.status{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.evidence{margin-top:8px}.evidence button{border:0;background:transparent;color:var(--forest);padding:0;text-decoration:underline;cursor:pointer}.panelstack{display:grid;gap:14px}.meter{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:12px 0}.meter span{height:5px;background:#ddd8ce}.meter span.on{background:var(--forest)}.approval{background:#fff8ec;border:1px solid #e1c99e}.overlay{position:fixed;inset:0;background:rgba(18,27,21,.55);display:none;place-items:center;padding:20px;z-index:5}.overlay.open{display:grid}.modal{max-width:560px;width:100%;background:var(--panel);border-radius:16px;padding:28px;box-shadow:var(--shadow)}.receipt{font-family:ui-monospace,monospace;background:#eeebe4;padding:13px;border-radius:8px;font-size:12px;word-break:break-all}.readiness{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:25px}.bigstate{font:500 38px Georgia,serif}.checklist{display:grid;gap:9px;margin-top:16px}.check{display:flex;gap:10px;align-items:flex-start}.handoff{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:24px}.mini{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}.mini .card{padding:14px}.kpi{font:500 24px Georgia,serif}.toast{position:fixed;right:24px;bottom:24px;background:var(--forest);color:white;padding:12px 16px;border-radius:9px;display:none;z-index:8}.toast.show{display:block}@media(max-width:850px){.shell{grid-template-columns:1fr}.side{position:static;height:auto}.nav{grid-template-columns:repeat(3,1fr)}.ownership{display:none}.main{padding:26px 18px}.grid3,.compare,.buildgrid,.readiness,.handoff{grid-template-columns:1fr}.intake{grid-template-columns:1fr}h1{font-size:36px}.top{align-items:flex-start;gap:14px}.mini{grid-template-columns:1fr 1fr}}
-</style></head><body><div class="shell"><aside class="side"><div class="mark">The Company Build Room</div><div class="case">BILLY BOB · NORTH DENTON COUNTY</div><nav class="nav" aria-label="Journey"><button data-screen="offer" class="active">01 Choose</button><button data-screen="intake">02 Understand</button><button data-screen="recommend">03 Decide</button><button data-screen="build">04 Build live</button><button data-screen="ready">05 Verify</button><button data-screen="handoff">06 Handoff</button></nav><div class="ownership">Billy Bob owns every account, domain, asset, customer record, and output. Access is delegated and revocable.</div></aside><main class="main"><div class="top"><div class="eyebrow">A controlled company assembly</div><div class="pill"><span class="dot"></span> Private draft · $0 spent</div></div>
-<section id="offer" class="screen active"><h1>Start with the part that is holding your lawn business back.</h1><p class="sub">Not a generic startup kit. We build around Billy Bob’s actual route, equipment, capacity, and customers. Nothing is purchased or published without approval.</p><div class="grid3"><article class="card"><h3>Build My Website</h3><div class="price">from $995</div><div class="small">Pricing hypothesis · one-time</div><ul class="clean"><li>Trust-first local website</li><li>Real service area and proof</li><li>Tested lead form</li><li>Founder-owned handoff</li></ul><button class="btn choose" data-choice="Website">Choose website</button></article><article class="card selected"><div class="eyebrow">Recommended for Billy</div><h3>Build My Business</h3><div class="price">from $2,495</div><div class="small">Pricing hypothesis · one-time</div><ul class="clean"><li>Offer and market challenge</li><li>Brand, website, workflows</li><li>Admin guidance and checks</li><li>Evidence-backed readiness</li></ul><button class="btn primary choose" data-choice="Business">Build my business</button></article><article class="card"><h3>Run My Business</h3><div class="price">from $499/mo</div><div class="small">After operating setup</div><ul class="clean"><li>Approved inbox and follow-up</li><li>Monitoring and weekly brief</li><li>Budgets and escalation gates</li><li>Cancel with your keys</li></ul><button class="btn choose" data-choice="Run">See operating plan</button></article></div><p class="small">No income or outcome guarantee. Filing fees, insurance, domains, software, equipment, and ads are separate and paid directly by Billy Bob.</p></section>
-<section id="intake" class="screen"><h2>Tell us how Billy Bob actually works.</h2><p class="sub">We preserve “unknown” instead of inventing answers. This example is prefilled for review.</p><div class="intake"><div class="field"><label for="location">Home base</label><input id="location" value="North Denton County, Texas"></div><div class="field"><label for="radius">Maximum service radius</label><select id="radius"><option>8 miles</option><option selected>12 miles</option><option>20 miles</option></select></div><div class="field"><label for="hours">Weekly field capacity</label><input id="hours" value="24 hours"></div><div class="field"><label for="customers">Current customers</label><input id="customers" value="6 recurring neighbors"></div><div class="field"><label for="equipment">Equipment Billy owns</label><input id="equipment" value="21-inch mower, trimmer, blower, pickup"></div><div class="field"><label for="exclude">Work Billy will not take</label><input id="exclude" value="Chemicals, irrigation, trees, hardscape"></div></div><div class="callout"><b>Founder control:</b> Identity, signatures, account terms, purchases, public claims, insurance, filings, exceptional pricing, hiring, and spend stay with Billy Bob.</div><div class="actions"><button class="btn primary next" data-next="recommend">Review recommendation</button><button class="btn save">Save draft</button></div></section>
-<section id="recommend" class="screen"><h2>We would narrow the launch.</h2><p class="sub">Billy asked for “full-service landscaping.” That is too broad for the known equipment, capacity, and unverified obligations.</p><div class="compare"><article class="card warn"><div class="eyebrow">Billy’s starting idea</div><h3>Full-service landscaping</h3><ul class="clean"><li>Unclear equipment and job duration</li><li>Chemical and irrigation work may trigger licenses</li><li>Hard to quote and schedule reliably</li><li>Public promises exceed verified ability</li></ul></article><article class="card recommend"><div class="eyebrow">Recommended launch wedge</div><h3>Recurring lawn maintenance</h3><ul class="clean"><li>Mow, edge, and blow</li><li>12-mile service radius</li><li>Starting-price hypothesis: $49/visit</li><li>18-job weekly capacity hypothesis</li></ul></article></div><div class="callout"><b>Why:</b> a route-dense recurring offer is easier to explain, test, schedule, and deliver. Price and capacity remain hypotheses until Billy validates them in the field.</div><div class="actions"><button class="btn primary approve" data-next="build">Approve this direction</button><button class="btn">Revise assumptions</button><button class="btn danger">Reject recommendation</button></div></section>
-<section id="build" class="screen"><div class="roomhead"><div><div class="eyebrow">Live company assembly</div><h2>Watch the real work, not theater.</h2></div><div class="pill">12 of 19 tasks have evidence</div></div><div class="progress"><span></span></div><div class="buildgrid"><div class="timeline"><div class="task"><div class="icon">✓</div><div><b>Local offer blueprint assembled</b><span class="small">Scope, radius, exclusions, quote policy, capacity</span><div class="evidence"><button data-evidence="Blueprint v1 records Billy’s approved 12-mile radius, mow/edge/blow scope, and excluded regulated work. SHA-256 receipt captured.">View evidence</button></div></div><span class="status">Verified</span></div><div class="task"><div class="icon">✓</div><div><b>Three brand directions rendered</b><span class="small">Calm, local, legible; no fake customer imagery</span><div class="evidence"><button data-evidence="Three desktop/mobile brand boards rendered. Contrast and small-size wordmark tests passed. Founder approval still governs public use.">View evidence</button></div></div><span class="status">Tested</span></div><div class="task"><div class="icon">✓</div><div><b>Lead-to-quote workflow tested</b><span class="small">In-radius, out-of-radius, missing address, duplicate</span><div class="evidence"><button data-evidence="4 fixtures run; 4 expected outcomes matched. No live customer message was sent.">View evidence</button></div></div><span class="status">Tested</span></div><div class="task"><div class="icon block">!</div><div><b>Purchase domain in Billy’s account</b><span class="small">Availability observed, not reserved · estimated $14–$24/year</span></div><button class="btn founder">Founder action</button></div><div class="task"><div class="icon block">!</div><div><b>Choose formation/admin path</b><span class="small">Do It For Me · Guide Me · Skip</span></div><button class="btn admin">Choose</button></div><div class="task"><div class="icon">→</div><div><b>Production website verification</b><span class="small">Blocked by domain and public-claims approval</span></div><span class="status">Proposed</span></div></div><aside class="panelstack"><div class="card"><div class="eyebrow">Website</div><h3>Executed, not yet verified</h3><div class="meter"><span class="on"></span><span class="on"></span><span class="on"></span><span></span></div><div class="small">Proposed → Executed → Tested → Verified</div></div><div class="card"><div class="eyebrow">Authority</div><h3>4 actions need Billy</h3><p class="small">$0 authorized · no filings · no live sends · no purchases</p></div><div class="card approval"><div class="eyebrow">Next approval</div><h3>Public service claims</h3><p class="small">Confirm that Billy has completed and can support mow, edge, and blow work in the stated area.</p><button class="btn primary claim">Review claims</button></div></aside></div></section>
-<section id="ready" class="screen"><h2>Ready is not the same as Fully Set.</h2><p class="sub">This distinction prevents polished assets from hiding unfinished ownership, compliance, or operating work.</p><div class="readiness"><article class="card"><div class="eyebrow">Current state</div><div class="bigstate">Almost Ready</div><p>One founder action blocks the first live lead path.</p><div class="checklist"><div class="check">✓ <span>Offer and exclusions approved</span></div><div class="check">✓ <span>Website preview and form tested</span></div><div class="check">✓ <span>Quote and scheduling rules tested</span></div><div class="check">○ <span>Domain purchase and production DNS</span></div></div><button class="btn primary gofounder">Complete founder action</button></article><article class="card"><div class="eyebrow">Higher bar</div><div class="bigstate">Fully Set</div><p>All selected launch obligations, provider accounts, monitoring, and ownership evidence are verified.</p><div class="checklist"><div class="check">○ <span>Formation/admin choice completed or explicitly deferred</span></div><div class="check">○ <span>Insurance decision verified by founder/provider</span></div><div class="check">○ <span>Production monitoring and recovery tested</span></div><div class="check">○ <span>Handoff export opened and checked</span></div></div></article></div><div class="mini"><div class="card"><div class="small">Tests</div><div class="kpi">18/19</div></div><div class="card"><div class="small">Open blockers</div><div class="kpi">1</div></div><div class="card"><div class="small">Spent</div><div class="kpi">$0</div></div></div></section>
-<section id="handoff" class="screen"><h2>Choose who operates after launch.</h2><p class="sub">Either choice leaves Billy Bob in control. Run It For Me is revocable operating access, not ownership.</p><div class="handoff"><article class="card"><div class="eyebrow">Ownership-first exit</div><h3>Take the Keys</h3><ul class="clean"><li>Accounts and recovery map</li><li>Website, brand, data, and media exports</li><li>Policies, workflow map, and test evidence</li><li>30-day runbook and access-revocation check</li></ul><button class="btn primary keys">Prepare handoff manifest</button></article><article class="card"><div class="eyebrow">Ongoing operating service</div><h3>Run It For Me</h3><ul class="clean"><li>Inbox, intake, and follow-up under policy</li><li>Weekly work/cost/evidence brief</li><li>$20 AI budget; $0 external spend authority</li><li>Exceptional price, refund, contract, and hiring escalate</li></ul><button class="btn run">Review permissions</button></article></div><div class="callout"><b>Cancellation behavior:</b> export current data, verify Billy can open it, list continuing vendor charges, revoke builder access, and preserve Billy’s domains, accounts, records, assets, and customers.</div></section>
-</main></div><div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal"><div class="eyebrow">Evidence and control</div><h2 id="modalTitle">Review</h2><p id="modalBody"></p><div id="modalExtra"></div><div class="actions"><button class="btn primary" id="confirm">Acknowledge</button><button class="btn" id="close">Close</button></div></div></div><div class="toast" id="toast" role="status"></div>
-<script>
-const screens=[...document.querySelectorAll('.screen')],nav=[...document.querySelectorAll('.nav button')];function show(id){screens.forEach(x=>x.classList.toggle('active',x.id===id));nav.forEach(x=>x.classList.toggle('active',x.dataset.screen===id));scrollTo({top:0,behavior:'smooth'})}nav.forEach(b=>b.onclick=()=>show(b.dataset.screen));document.querySelectorAll('[data-next]').forEach(b=>b.onclick=()=>{toast(b.classList.contains('approve')?'Direction approved and recorded':'Draft saved');show(b.dataset.next)});document.querySelectorAll('.choose').forEach(b=>b.onclick=()=>{toast(b.dataset.choice+' selected');show(b.dataset.choice==='Run'?'handoff':'intake')});document.querySelectorAll('.save').forEach(b=>b.onclick=()=>toast('Draft saved locally for this review'));const ov=document.getElementById('overlay'),title=document.getElementById('modalTitle'),body=document.getElementById('modalBody'),extra=document.getElementById('modalExtra');function modal(t,b,e=''){title.textContent=t;body.textContent=b;extra.innerHTML=e;ov.classList.add('open')}document.querySelectorAll('[data-evidence]').forEach(b=>b.onclick=()=>modal('Evidence receipt',b.dataset.evidence,'<div class="receipt">evidence://billy-bob/'+Math.random().toString(16).slice(2)+'</div>'));document.querySelectorAll('.founder,.gofounder').forEach(b=>b.onclick=()=>modal('Founder-only: domain','Open a registrar account owned by Billy Bob, review the exact domain and renewal price, purchase directly, then return evidence. The builder cannot click purchase or accept terms.'));document.querySelector('.admin').onclick=()=>modal('Formation and admin choice','Choose how each item should be handled. Skipping may prevent Fully Set.','<div class="actions"><button class="btn" onclick="toast(\'Do It For Me selected: preparation only\')">Do It For Me</button><button class="btn" onclick="toast(\'Guide Me selected\')">Guide Me</button><button class="btn" onclick="toast(\'Skipped with consequence recorded\')">Skip</button></div>');document.querySelector('.claim').onclick=()=>modal('Approve public claims','Billy confirms the business can perform mow, edge, and blow work. This does not verify a license, insurance policy, or customer outcome.');document.querySelector('.keys').onclick=()=>modal('Handoff manifest prepared','Accounts, files, evidence, policies, subscriptions, recovery routes, and revocation steps are listed. The export must be opened and checksum-tested before handoff is Verified.');document.querySelector('.run').onclick=()=>modal('Operating permissions','Allowed: read approved inbox, draft routine replies, request missing quote inputs, send within approved policy after pilot. Denied: spend, refund, sign, contract, change price, hire, file, or delete accounts.');document.getElementById('close').onclick=()=>ov.classList.remove('open');document.getElementById('confirm').onclick=()=>{ov.classList.remove('open');toast('Acknowledgment recorded in the audit trail')};ov.onclick=e=>{if(e.target===ov)ov.classList.remove('open')};function toast(s){const t=document.getElementById('toast');t.textContent=s;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Offline Build Room projection for Billy Bob Lawn Care">
+  <title>Build Room · Billy Bob Lawn Care</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to build details</a>
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="Business Builder home">
+      <span class="brand-mark" aria-hidden="true">BB</span>
+      <span>Business Builder</span>
+    </a>
+    <div class="topbar-meta">
+      <span class="mode-badge"><span class="pulse" aria-hidden="true"></span> Offline proof</span>
+      <button class="icon-button" type="button" id="helpButton" aria-label="About this prototype">?</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <nav class="rail" aria-label="Build Room sections">
+      <a href="#overview" class="nav-link active" aria-current="page"><span aria-hidden="true">⌂</span><span>Overview</span></a>
+      <a href="#work" class="nav-link"><span aria-hidden="true">▦</span><span>Work</span></a>
+      <a href="#actions" class="nav-link"><span aria-hidden="true">◇</span><span>Your actions</span></a>
+      <a href="#evidence" class="nav-link"><span aria-hidden="true">✓</span><span>Evidence</span></a>
+      <a href="#handoff" class="nav-link"><span aria-hidden="true">↗</span><span>Handoff</span></a>
+      <div class="rail-note">
+        <strong>Read-only view</strong>
+        <span>Canonical records control execution.</span>
+      </div>
+    </nav>
+
+    <main id="main">
+      <section class="hero" id="overview" aria-labelledby="companyName">
+        <div>
+          <p class="eyebrow">Company build room</p>
+          <h1 id="companyName">Billy Bob Lawn Care</h1>
+          <p class="hero-copy" id="companyMeta"></p>
+        </div>
+        <div class="hero-actions">
+          <span class="sync"><span aria-hidden="true">↻</span> Snapshot <time id="generatedAt"></time></span>
+          <button class="secondary-button" type="button" id="timelineButton">View activity</button>
+        </div>
+      </section>
+
+      <section class="readiness-grid" aria-label="Launch readiness">
+        <article class="readiness-card primary-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">Launch state</p>
+              <h2>Ready</h2>
+            </div>
+            <span class="state-pill blocked" id="readyState">Not ready</span>
+          </div>
+          <p id="readinessExplanation"></p>
+          <div class="progress-label"><span>Verified build work</span><strong id="progressText"></strong></div>
+          <div class="progress-track" role="progressbar" aria-label="Verified build work" aria-valuemin="0" aria-valuemax="100" id="progressBar"><span></span></div>
+        </article>
+        <article class="readiness-card">
+          <div class="card-heading">
+            <div><p class="eyebrow">Completion state</p><h2>Fully Set</h2></div>
+            <span class="state-pill neutral" id="fullySetState">Not yet</span>
+          </div>
+          <p>Ready plus selected setup obligations, monitoring and customer handoff.</p>
+          <ul class="mini-list" id="fullySetList"></ul>
+        </article>
+        <article class="readiness-card budget-card">
+          <div class="card-heading"><div><p class="eyebrow">Budget guardrail</p><h2 id="budgetAvailable"></h2></div><span class="state-pill good">Within cap</span></div>
+          <p>Available from the company build ceiling. A ceiling is never a spending target.</p>
+          <dl class="money-grid"><div><dt>Settled</dt><dd id="budgetSettled"></dd></div><div><dt>Reserved</dt><dd id="budgetReserved"></dd></div><div><dt>Ceiling</dt><dd id="budgetCeiling"></dd></div></dl>
+        </article>
+      </section>
+
+      <section class="section" id="work" aria-labelledby="workTitle">
+        <div class="section-heading">
+          <div><p class="eyebrow">Real work, discrete records</p><h2 id="workTitle">Build plan</h2></div>
+          <div class="filter-group" aria-label="Filter build plan">
+            <button class="filter active" type="button" data-filter="all" aria-pressed="true">All</button>
+            <button class="filter" type="button" data-filter="active" aria-pressed="false">Active</button>
+            <button class="filter" type="button" data-filter="blocked" aria-pressed="false">Blocked</button>
+            <button class="filter" type="button" data-filter="done" aria-pressed="false">Done</button>
+          </div>
+        </div>
+        <div class="work-grid" id="workGrid" aria-live="polite"></div>
+      </section>
+
+      <section class="split-section" id="actions">
+        <div class="panel">
+          <div class="section-heading compact"><div><p class="eyebrow">Only you can do these</p><h2>Founder actions</h2></div><span class="count" id="actionCount"></span></div>
+          <div id="actionList" class="stack"></div>
+        </div>
+        <div class="panel blockers-panel">
+          <div class="section-heading compact"><div><p class="eyebrow">Fail-closed gates</p><h2>Open blockers</h2></div><span class="count alert" id="blockerCount"></span></div>
+          <div id="blockerList" class="stack"></div>
+        </div>
+      </section>
+
+      <section class="section" id="evidence" aria-labelledby="evidenceTitle">
+        <div class="section-heading"><div><p class="eyebrow">Proof, not confidence</p><h2 id="evidenceTitle">Approvals & evidence</h2></div><p class="section-note">Every decision is scope-bound and every check has evidence.</p></div>
+        <div class="evidence-grid" id="approvalGrid"></div>
+      </section>
+
+      <section class="handoff" id="handoff" aria-labelledby="handoffTitle">
+        <div class="handoff-icon" aria-hidden="true">↗</div>
+        <div><p class="eyebrow">Customer-owned from day one</p><h2 id="handoffTitle">Take the Keys</h2><p id="handoffDescription"></p><ul class="handoff-list" id="handoffList"></ul></div>
+        <div class="handoff-action"><span class="state-pill blocked">Locked by evidence</span><button type="button" disabled>Prepare export</button><small id="handoffBlocked"></small></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="detailDialog" aria-labelledby="dialogTitle">
+    <div class="dialog-head"><div><p class="eyebrow">Canonical record</p><h2 id="dialogTitle">Details</h2></div><button type="button" class="icon-button" id="closeDialog" aria-label="Close details">×</button></div>
+    <div id="dialogContent"></div>
+  </dialog>
+
+  <noscript><p class="noscript">JavaScript is required to render this local, read-only projection.</p></noscript>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
