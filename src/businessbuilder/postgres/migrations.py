@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from typing import Any
+
+import psycopg
+
+
+MIGRATION_VERSION = 1
+
+
+DDL = r"""
+CREATE TABLE IF NOT EXISTS bb_schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS bb_identity_records (
+    kind TEXT NOT NULL,
+    record_key TEXT NOT NULL,
+    tenant_id TEXT,
+    body TEXT NOT NULL,
+    PRIMARY KEY (kind, record_key)
+);
+CREATE INDEX IF NOT EXISTS bb_identity_records_tenant
+    ON bb_identity_records (tenant_id, kind);
+CREATE TABLE IF NOT EXISTS bb_identity_audit_events (
+    sequence BIGSERIAL UNIQUE,
+    audit_event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bb_commercial_records (
+    sequence BIGSERIAL UNIQUE,
+    kind TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    tenant_id TEXT,
+    company_id TEXT,
+    body TEXT NOT NULL,
+    PRIMARY KEY (kind, scope_key, version)
+);
+CREATE INDEX IF NOT EXISTS bb_commercial_scope
+    ON bb_commercial_records (tenant_id, company_id, kind);
+CREATE TABLE IF NOT EXISTS bb_commercial_audit_events (
+    sequence BIGSERIAL UNIQUE,
+    audit_event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bb_processed_billing_events (
+    provider TEXT NOT NULL,
+    provider_event_ref TEXT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, provider_event_ref)
+);
+
+CREATE TABLE IF NOT EXISTS bb_runtime_events (
+    sequence BIGSERIAL UNIQUE,
+    event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    body TEXT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_events_scope_sequence
+    ON bb_runtime_events (tenant_id, company_id, sequence);
+CREATE TABLE IF NOT EXISTS bb_runtime_jobs (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    body TEXT NOT NULL,
+    UNIQUE (tenant_id, company_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS bb_runtime_jobs_scope
+    ON bb_runtime_jobs (tenant_id, company_id);
+CREATE TABLE IF NOT EXISTS bb_runtime_approvals (
+    approval_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bb_runtime_budgets (
+    budget_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bb_runtime_reservations (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    budget_id TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    reserved_minor INTEGER NOT NULL,
+    settled_minor INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bb_runtime_capability_invocations (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    result TEXT,
+    PRIMARY KEY (tenant_id, company_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS bb_runtime_audit_events (
+    sequence BIGSERIAL UNIQUE,
+    audit_event_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    body TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bb_companies (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    lifecycle TEXT NOT NULL,
+    readiness TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, company_id)
+);
+CREATE TABLE IF NOT EXISTS bb_company_versions (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    payload TEXT NOT NULL,
+    lifecycle TEXT NOT NULL,
+    readiness TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, company_id, version),
+    FOREIGN KEY (tenant_id, company_id) REFERENCES bb_companies (tenant_id, company_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS bb_brain_records (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    kind TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    knowledge_class TEXT NOT NULL,
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    owner_ref_json TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    lifecycle TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    supersedes_version INTEGER,
+    superseded_by_version INTEGER,
+    invalidated_at TEXT,
+    invalidation_reason TEXT,
+    PRIMARY KEY (tenant_id, company_id, record_id, version),
+    FOREIGN KEY (tenant_id, company_id) REFERENCES bb_companies (tenant_id, company_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bb_one_current_record
+    ON bb_brain_records (tenant_id, company_id, record_id)
+    WHERE superseded_by_version IS NULL;
+CREATE INDEX IF NOT EXISTS bb_current_records_by_kind
+    ON bb_brain_records (tenant_id, company_id, kind, record_id)
+    WHERE superseded_by_version IS NULL;
+CREATE TABLE IF NOT EXISTS bb_brain_dependencies (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    source_record_id TEXT NOT NULL,
+    dependent_type TEXT NOT NULL,
+    dependent_id TEXT NOT NULL,
+    dependent_version INTEGER,
+    trigger TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, company_id, source_record_id, dependent_type, dependent_id),
+    FOREIGN KEY (tenant_id, company_id) REFERENCES bb_companies (tenant_id, company_id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS bb_invalidation_notices (
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    notice_id TEXT NOT NULL,
+    source_record_id TEXT NOT NULL,
+    source_version INTEGER NOT NULL,
+    dependent_type TEXT NOT NULL,
+    dependent_id TEXT NOT NULL,
+    dependent_version INTEGER,
+    trigger TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, company_id, notice_id),
+    FOREIGN KEY (tenant_id, company_id) REFERENCES bb_companies (tenant_id, company_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS bb_verification_records (
+    sequence BIGSERIAL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    verification_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    state TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, company_id, verification_id, version)
+);
+CREATE INDEX IF NOT EXISTS bb_verification_scope
+    ON bb_verification_records (tenant_id, company_id, verification_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS bb_cloud_proofs (
+    proof_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    body TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE OR REPLACE FUNCTION bb_reject_append_only_mutation() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bb_identity_audit_append_only ON bb_identity_audit_events;
+CREATE TRIGGER bb_identity_audit_append_only
+    BEFORE UPDATE OR DELETE ON bb_identity_audit_events
+    FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
+DROP TRIGGER IF EXISTS bb_commercial_audit_append_only ON bb_commercial_audit_events;
+CREATE TRIGGER bb_commercial_audit_append_only
+    BEFORE UPDATE OR DELETE ON bb_commercial_audit_events
+    FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
+DROP TRIGGER IF EXISTS bb_runtime_audit_append_only ON bb_runtime_audit_events;
+CREATE TRIGGER bb_runtime_audit_append_only
+    BEFORE UPDATE OR DELETE ON bb_runtime_audit_events
+    FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
+"""
+
+
+def migrate(connection: psycopg.Connection[dict[str, Any]]) -> None:
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute(DDL)
+            cursor.execute(
+                "INSERT INTO bb_schema_migrations(version) VALUES (%s) ON CONFLICT (version) DO NOTHING",
+                (MIGRATION_VERSION,),
+            )
