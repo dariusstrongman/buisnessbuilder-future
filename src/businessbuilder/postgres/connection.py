@@ -17,6 +17,7 @@ def connect_postgres(
     *,
     schema: str | None = None,
     application_name: str = "businessbuilder-staging",
+    ensure_schema: bool = True,
 ) -> psycopg.Connection[dict[str, Any]]:
     """Open a PostgreSQL connection without ever constructing or logging a credential URL."""
     schema_name = schema or os.environ.get("DB_SCHEMA", "businessbuilder")
@@ -48,6 +49,13 @@ def connect_postgres(
         )
 
     with connection.cursor() as cursor:
-        cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema_name)))
-        cursor.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
+        if ensure_schema:
+            cursor.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+        cursor.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name))
+        )
     return connection

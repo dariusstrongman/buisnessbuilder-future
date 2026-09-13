@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
+import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,109 +19,288 @@ ROOT = Path(__file__).resolve().parent
 PROTOTYPE = ROOT / "prototype"
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "staging")
-INSTANCE_ID = uuid.uuid4().hex
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
+MAX_REQUEST_TARGET_BYTES = 8192
+PUBLIC_ASSETS = {
+    "/": "/index.html",
+    "/index.html": "/index.html",
+    "/app.js": "/app.js",
+    "/data.js": "/data.js",
+    "/styles.css": "/styles.css",
+}
+PROOF_ENVIRONMENTS = frozenset({"development", "local", "test"})
+
+
+def _proof_endpoints_enabled() -> bool:
+    enabled = os.environ.get("ENABLE_PROOF_ENDPOINTS", "").strip().lower()
+    environment = os.environ.get("ENVIRONMENT", ENVIRONMENT).strip().lower()
+    return enabled in {"1", "true", "yes"} and environment in PROOF_ENVIRONMENTS
 
 
 def _database_health() -> None:
-    connection = connect_postgres(application_name="businessbuilder-health")
+    connection = connect_postgres(
+        application_name="businessbuilder-health", ensure_schema=False
+    )
     try:
-        migrate(connection)
         with connection.cursor() as cursor:
-            cursor.execute("SELECT 1 AS healthy")
-            if cursor.fetchone()["healthy"] != 1:
+            cursor.execute(
+                "SELECT 1 AS healthy, "
+                "to_regclass('bb_schema_migrations') IS NOT NULL AS migrated"
+            )
+            row = cursor.fetchone()
+            if row["healthy"] != 1 or not row["migrated"]:
                 raise RuntimeError("PostgreSQL health query failed")
     finally:
         connection.close()
 
 
+def _initialize_database() -> None:
+    connection = connect_postgres(application_name="businessbuilder-startup")
+    try:
+        migrate(connection)
+    finally:
+        connection.close()
+
+
 class StagingHandler(SimpleHTTPRequestHandler):
-    server_version = "BusinessBuilderStaging/1"
+    server_version = "BusinessBuilder"
+    sys_version = ""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, directory=str(PROTOTYPE), **kwargs)
 
-    def _json(self, status: HTTPStatus, body: dict[str, object]) -> None:
+    def version_string(self) -> str:
+        return self.server_version
+
+    def _json(
+        self,
+        status: HTTPStatus,
+        body: dict[str, object],
+        *,
+        send_body: bool = True,
+    ) -> None:
         payload = json.dumps(body, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(payload)
+        if send_body:
+            self.wfile.write(payload)
+
+    def _request_envelope_allowed(self) -> bool:
+        if len(self.path.encode("utf-8", errors="replace")) > MAX_REQUEST_TARGET_BYTES:
+            self._json(
+                HTTPStatus.REQUEST_URI_TOO_LONG,
+                {"status": "error", "error": "request target too long"},
+                send_body=self.command != "HEAD",
+            )
+            return False
+        if self.headers.get("Transfer-Encoding") is not None:
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"status": "error", "error": "unsupported request framing"},
+                send_body=self.command != "HEAD",
+            )
+            return False
+        lengths = self.headers.get_all("Content-Length", failobj=[])
+        if len(lengths) > 1:
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"status": "error", "error": "invalid content length"},
+                send_body=self.command != "HEAD",
+            )
+            return False
+        if lengths:
+            try:
+                length = int(lengths[0], 10)
+            except ValueError:
+                length = -1
+            if length < 0:
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"status": "error", "error": "invalid content length"},
+                    send_body=self.command != "HEAD",
+                )
+                return False
+            if length > MAX_REQUEST_BODY_BYTES:
+                self._json(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"status": "error", "error": "request body too large"},
+                    send_body=self.command != "HEAD",
+                )
+                return False
+        return True
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "object-src 'none'; form-action 'self'",
+        )
+        self.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+        )
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         super().end_headers()
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+    def _serve_get(self, *, send_body: bool) -> None:
+        if not self._request_envelope_allowed():
+            return
         path = urlsplit(self.path).path
         if path == "/healthz":
             try:
                 _database_health()
                 self._json(
                     HTTPStatus.OK,
-                    {
-                        "status": "ok",
-                        "service": "businessbuilder-staging",
-                        "environment": ENVIRONMENT,
-                        "version": APP_VERSION,
-                        "instance_id": INSTANCE_ID,
-                        "persistence": "postgresql",
-                    },
+                    {"status": "ok"},
+                    send_body=send_body,
                 )
-            except Exception as exc:
-                self.log_error("database health failed: %s", exc)
+            except Exception:
+                self.log_error("database health failed")
                 self._json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
-                    {
-                        "status": "unhealthy",
-                        "service": "businessbuilder-staging",
-                        "persistence": "postgresql",
-                    },
+                    {"status": "unhealthy"},
+                    send_body=send_body,
                 )
             return
         if path in {"/proof", "/api/v1/proofs/billy-bob-commercial"}:
+            if not _proof_endpoints_enabled():
+                self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"status": "not_found"},
+                    send_body=send_body,
+                )
+                return
             try:
-                self._json(HTTPStatus.OK, run_cloud_proof())
-            except Exception as exc:
-                self.log_error("PostgreSQL commercial proof failed: %s", exc)
+                self._json(
+                    HTTPStatus.OK, run_cloud_proof(), send_body=send_body
+                )
+            except Exception:
+                self.log_error("commercial proof failed")
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {
                         "status": "failed",
                         "proof": "billy-bob-commercial-postgres-v1",
                     },
+                    send_body=send_body,
                 )
             return
         if path == "/api/v1/proofs/billy-bob-commercial/state":
+            if not _proof_endpoints_enabled():
+                self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"status": "not_found"},
+                    send_body=send_body,
+                )
+                return
             proof = get_cloud_proof()
             if proof is None:
                 self._json(
                     HTTPStatus.NOT_FOUND,
                     {"status": "not_run", "backend": "postgresql"},
+                    send_body=send_body,
                 )
             else:
-                self._json(HTTPStatus.OK, proof)
+                self._json(HTTPStatus.OK, proof, send_body=send_body)
             return
         if path == "/api/v1":
             self._json(
                 HTTPStatus.OK,
                 {
-                    "service": "businessbuilder-staging",
+                    "service": "businessbuilder",
                     "api_version": "v1",
-                    "persistence": "postgresql",
-                    "billing_provider": "simulated",
-                    "readiness_authority": "verification",
                 },
+                send_body=send_body,
             )
             return
-        super().do_GET()
+        asset_path = PUBLIC_ASSETS.get(path)
+        if asset_path is None:
+            self._json(
+                HTTPStatus.NOT_FOUND,
+                {"status": "not_found"},
+                send_body=send_body,
+            )
+            return
+        self.path = asset_path
+        if send_body:
+            super().do_GET()
+        else:
+            super().do_HEAD()
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        self._serve_get(send_body=True)
+
+    def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler API
+        self._serve_get(send_body=False)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._request_envelope_allowed():
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _method_not_allowed(self) -> None:
+        if not self._request_envelope_allowed():
+            return
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        self.send_header("Content-Type", "application/json")
+        payload = b'{"error":"method not allowed","status":"error"}'
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    do_POST = _method_not_allowed
+    do_PUT = _method_not_allowed
+    do_PATCH = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_TRACE = _method_not_allowed
+    do_CONNECT = _method_not_allowed
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        del message, explain
+        try:
+            status = HTTPStatus(code)
+        except ValueError:
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        self._json(
+            status,
+            {"status": "error", "error": "request failed"},
+            send_body=self.command != "HEAD",
+        )
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        path = urlsplit(self.path).path
+        sys.stderr.write(
+            f"businessbuilder_http method={self.command} path={path} "
+            f"status={code} size={size}\n"
+        )
+
+    def log_error(self, format: str, *args: object) -> None:
+        del format, args
+        path = urlsplit(self.path).path
+        sys.stderr.write(
+            f"businessbuilder_http_error method={self.command} path={path}\n"
+        )
 
 
 if __name__ == "__main__":
-    _database_health()
+    _initialize_database()
     port = int(os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), StagingHandler)
     print(f"Business Builder staging listening on :{port}", flush=True)
