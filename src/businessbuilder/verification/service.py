@@ -67,14 +67,14 @@ class VerificationService:
         if target_state is not expected:
             raise IllegalTransitionError(f"illegal transition: {record.state.value} -> {target_state.value}")
         if record.failure_reason and target_state is VerificationState.VERIFIED:
-            missing = self._missing_defined_tests(evidence, definition, now)
+            missing = self._missing_fresh_defined_tests(evidence, record, definition, now)
             if missing:
                 raise MissingEvidenceError(
                     "new passing test evidence is required after a recorded failure for: "
                     + ", ".join(missing)
                 )
         if record.stale_reason and target_state is VerificationState.TESTED:
-            missing = self._missing_defined_tests(evidence, definition, now)
+            missing = self._missing_fresh_defined_tests(evidence, record, definition, now)
             if missing:
                 raise MissingEvidenceError(
                     "new passing test evidence is required after invalidation for: " + ", ".join(missing)
@@ -198,6 +198,23 @@ class VerificationService:
             item.test_name
             for item in evidence
             if item.supports_defined_test(definition.defined_tests, at)
+        }
+        return tuple(sorted(definition.defined_tests - passed))
+
+    @staticmethod
+    def _missing_fresh_defined_tests(
+        evidence: tuple[EvidenceRef, ...],
+        record: VerificationRecord,
+        definition: VerificationDefinition,
+        at: datetime,
+    ) -> tuple[str, ...]:
+        existing_ids = {item.evidence_id for item in record.evidence}
+        passed = {
+            item.test_name
+            for item in evidence
+            if item.evidence_id not in existing_ids
+            and record.updated_at <= item.captured_at <= at
+            and item.supports_defined_test(definition.defined_tests, at)
         }
         return tuple(sorted(definition.defined_tests - passed))
 

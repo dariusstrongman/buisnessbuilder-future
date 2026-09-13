@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -210,6 +211,112 @@ class VerificationStateMachineTests(unittest.TestCase):
             at=FIXTURE_NOW,
         )
         self.assertEqual(VerificationState.VERIFIED, verified.state)
+
+    def test_failure_retest_rejects_resubmitted_pre_failure_evidence(self) -> None:
+        record = proposed_record("verification_failure_old_evidence", "website.links")
+        self.service.create(record)
+        self.service.transition(
+            TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED, at=FIXTURE_NOW
+        )
+        old = evidence(
+            "evidence_before_failure",
+            EvidenceType.TEST_RESULT,
+            test_name="link-crawl",
+            passed=True,
+            expires_at=FIXTURE_NOW + timedelta(days=1),
+        )
+        self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.TESTED,
+            evidence=(old,),
+            at=FIXTURE_NOW,
+        )
+        self.service.transition(
+            TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.VERIFIED, at=FIXTURE_NOW
+        )
+        failed_at = FIXTURE_NOW + timedelta(hours=1)
+        self.service.record_failure(
+            TENANT_ID, COMPANY_ID, record.verification_id, "later regression", at=failed_at
+        )
+        with self.assertRaisesRegex(MissingEvidenceError, "new passing test evidence"):
+            self.service.transition(
+                TENANT_ID,
+                COMPANY_ID,
+                record.verification_id,
+                VerificationState.VERIFIED,
+                evidence=(old,),
+                at=failed_at,
+            )
+
+        fresh = replace(old, evidence_id="evidence_after_failure", captured_at=failed_at)
+        verified = self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.VERIFIED,
+            evidence=(fresh,),
+            at=failed_at,
+        )
+        self.assertEqual(VerificationState.VERIFIED, verified.state)
+
+    def test_invalidation_retest_rejects_resubmitted_pre_invalidation_evidence(self) -> None:
+        record = proposed_record(
+            "verification_invalidation_old_evidence",
+            "website.links",
+            dependencies=(DependencyRef("website_deployment", 4, "website_deployment"),),
+        )
+        self.service.create(record)
+        self.service.transition(
+            TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.EXECUTED, at=FIXTURE_NOW
+        )
+        old = evidence(
+            "evidence_before_invalidation",
+            EvidenceType.TEST_RESULT,
+            test_name="link-crawl",
+            passed=True,
+            expires_at=FIXTURE_NOW + timedelta(days=1),
+        )
+        self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.TESTED,
+            evidence=(old,),
+            at=FIXTURE_NOW,
+        )
+        self.service.transition(
+            TENANT_ID, COMPANY_ID, record.verification_id, VerificationState.VERIFIED, at=FIXTURE_NOW
+        )
+        invalidated_at = FIXTURE_NOW + timedelta(hours=1)
+        self.service.invalidate_dependency(
+            TENANT_ID,
+            COMPANY_ID,
+            "website_deployment",
+            5,
+            at=invalidated_at,
+        )
+        with self.assertRaisesRegex(MissingEvidenceError, "new passing test evidence"):
+            self.service.transition(
+                TENANT_ID,
+                COMPANY_ID,
+                record.verification_id,
+                VerificationState.TESTED,
+                evidence=(old,),
+                at=invalidated_at,
+            )
+
+        fresh = replace(old, evidence_id="evidence_after_invalidation", captured_at=invalidated_at)
+        tested = self.service.transition(
+            TENANT_ID,
+            COMPANY_ID,
+            record.verification_id,
+            VerificationState.TESTED,
+            evidence=(fresh,),
+            at=invalidated_at,
+        )
+        self.assertEqual(VerificationState.TESTED, tested.state)
 
     def test_cross_company_evidence_is_rejected(self) -> None:
         record = proposed_record("verification_cross_company", "website.links")
