@@ -470,16 +470,18 @@ def _submit(app, secret_ref, request, event, role, action):
 def _prepare_submit_deny(app, safety, connection, secret_ref, recipient, event, key,
                          purpose, content, evidence, *, role="role_inbox_assistant",
                          action="send_preapproved_reply"):
-    request = safety.prepare_request(
-        tenant_id=TENANT, company_id=COMPANY, recipient_id=recipient.recipient_id,
-        purpose=purpose, agent_role=role, capability="communications.email",
-        provider_connection_id=connection.connection_id,
-        runtime_idempotency_key=key, content=content, evidence=evidence,
-        context_ref=event.event_id)
-    job = _submit(app, secret_ref, request, event, role, action)
-    envelope = app.runtime_repository.get_agent_envelope(TENANT, COMPANY, job.job_id)
-    return _denied(lambda: app.broker.execute_provider_action(
-        envelope, operation=action, secret_ref=secret_ref))
+    def attempt():
+        request = safety.prepare_request(
+            tenant_id=TENANT, company_id=COMPANY, recipient_id=recipient.recipient_id,
+            purpose=purpose, agent_role=role, capability="communications.email",
+            provider_connection_id=connection.connection_id,
+            runtime_idempotency_key=key, content=content, evidence=evidence,
+            context_ref=event.event_id)
+        job = _submit(app, secret_ref, request, event, role, action)
+        envelope = app.runtime_repository.get_agent_envelope(TENANT, COMPANY, job.job_id)
+        return app.broker.execute_provider_action(
+            envelope, operation=action, secret_ref=secret_ref)
+    return _denied(attempt)
 
 
 def _activate(app, user_id, clock):
