@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
 import json
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from businessbuilder.access_broker import ArtifactClassification, ArtifactStatus, ReceiptStatus
 from businessbuilder.company_brain import (
@@ -27,6 +27,9 @@ from businessbuilder.verification import (
     VerificationState,
 )
 from businessbuilder.verification.catalog import VerificationDefinition
+
+if TYPE_CHECKING:
+    from .evidence_review import ResidentialCleaningEvidenceReviewService
 
 
 TRANSITION_CAPABILITY = "pilot.residential_cleaning.founder_action.transition"
@@ -367,16 +370,18 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
         company_brain: CompanyBrainService,
         runtime_repository: RuntimeRepository,
         clock: Callable[[], datetime],
+        evidence_reviews: ResidentialCleaningEvidenceReviewService | None = None,
     ) -> None:
         self.company_brain = company_brain
         self.runtime_repository = runtime_repository
         self.clock = clock
+        self.evidence_reviews = evidence_reviews
 
     def validate_request(self, request: CapabilityRequest) -> None:
         if request.capability != self.name or request.capability_version != self.version:
             raise ValueError("founder-action transition capability mismatch")
         if request.inputs.get("operation") not in {
-            "explain", "launch", "founder_complete", "capture_result"
+            "explain", "launch", "founder_complete", "capture_result", "capture_reviewed_result"
         }:
             raise ValueError("unsupported founder-action operation")
         if request.inputs.get("action_id") not in DEFINITIONS_BY_ID:
@@ -400,10 +405,11 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
             "launch": FounderActionStage.LINKED,
             "founder_complete": FounderActionStage.FOUNDER_COMPLETED,
             "capture_result": FounderActionStage.RESULT_CAPTURED,
+            "capture_reviewed_result": FounderActionStage.RESULT_CAPTURED,
         }[operation]
         current = FounderActionStage(action.data["state"])
         if _STAGE_ORDER[current] > _STAGE_ORDER[target]:
-            if operation == "capture_result":
+            if operation in {"capture_result", "capture_reviewed_result"}:
                 supplied = self._references(request.inputs.get("evidence_refs", []))
                 existing = {
                     (item["source_class"], item["reference"])
@@ -413,7 +419,7 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
                     raise PermissionError("captured evidence is immutable")
             return self._result(action.record_id, operation)
         if current is target:
-            if operation == "capture_result":
+            if operation in {"capture_result", "capture_reviewed_result"}:
                 supplied = self._references(request.inputs.get("evidence_refs", []))
                 existing = {(item["source_class"], item["reference"]) for item in action.data["evidence"]}
                 if not supplied.issubset(existing):
@@ -434,7 +440,17 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
         evidence = [dict(item) for item in data.get("evidence", [])]
         if operation == "founder_complete":
             evidence.append(self._founder_attestation(action.record_id, request.inputs["actor_id"], stamp))
-        elif operation == "capture_result":
+        elif operation in {"capture_result", "capture_reviewed_result"}:
+            if operation == "capture_reviewed_result":
+                if self.evidence_reviews is None:
+                    raise PermissionError("operator-reviewed evidence boundary is unavailable")
+                expected_refs, review_ids = self.evidence_reviews.active_accepted_references(
+                    scope.tenant_id, scope.company_id, action.record_id
+                )
+                supplied = self._references(request.inputs.get("evidence_refs", []))
+                expected = self._references(expected_refs)
+                if supplied != expected or request.inputs.get("review_ids") != list(review_ids):
+                    raise PermissionError("Runtime evidence set is not bound to current accepted reviews")
             evidence.extend(
                 self._resolve_evidence(scope, action.record_id, request.inputs.get("evidence_refs", []), stamp)
             )
@@ -447,13 +463,18 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
         history = [*data.get("history", []), {
             "state": target.value,
             "at": stamp,
-            "actor_type": "founder" if operation in {"founder_complete", "capture_result"} else "runtime",
-            "actor_id": request.inputs["actor_id"] if operation in {"founder_complete", "capture_result"} else request.job_id,
+            "actor_type": (
+                "operator" if operation == "capture_reviewed_result"
+                else "founder" if operation in {"founder_complete", "capture_result"}
+                else "runtime"
+            ),
+            "actor_id": request.inputs["actor_id"] if operation in {"founder_complete", "capture_result", "capture_reviewed_result"} else request.job_id,
             "reason": {
                 "explain": "Founder was shown the scoped reason, checklist, evidence requirements, and uncertainty",
                 "launch": "Prepared handoff destination was issued without performing the external action",
                 "founder_complete": "Founder attested that the external or founder-controlled step was completed",
                 "capture_result": "Scoped result references were validated and captured",
+                "capture_reviewed_result": "Runtime captured only the current operator-accepted evidence set",
             }[operation],
         }]
         changed = {
@@ -463,8 +484,12 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
             "evidence_refs": [item["reference"] for item in evidence],
             "timestamps": {**data.get("timestamps", {}), target.value: stamp},
             "last_actor": {
-                "type": "founder" if operation in {"founder_complete", "capture_result"} else "runtime",
-                "id": request.inputs["actor_id"] if operation in {"founder_complete", "capture_result"} else request.job_id,
+                "type": (
+                    "operator" if operation == "capture_reviewed_result"
+                    else "founder" if operation in {"founder_complete", "capture_result"}
+                    else "runtime"
+                ),
+                "id": request.inputs["actor_id"] if operation in {"founder_complete", "capture_result", "capture_reviewed_result"} else request.job_id,
             },
             "history": history,
         }
@@ -473,7 +498,13 @@ class ResidentialCleaningFounderActionTransitionCapability(Capability):
             record_id=action.record_id,
             kind=action.kind,
             data=changed,
-            knowledge_class=KnowledgeClass.FOUNDER_DECISION if operation in {"founder_complete", "capture_result"} else action.knowledge_class,
+            knowledge_class=(
+                KnowledgeClass.EXTERNAL_VERIFICATION
+                if operation == "capture_reviewed_result"
+                else KnowledgeClass.FOUNDER_DECISION
+                if operation in {"founder_complete", "capture_result"}
+                else action.knowledge_class
+            ),
             provenance=action.provenance,
             confidence=None,
             owner_ref=action.owner_ref,
@@ -615,6 +646,34 @@ class DeterministicResidentialCleaningEvidenceVerifier:
         )
 
 
+class ResidentialCleaningReviewedEvidenceVerifier:
+    """Server verifier for evidence already accepted through the operator-review boundary."""
+
+    verifier_id = "business_builder_reviewed_evidence_verifier"
+
+    def review(self, action: dict[str, Any], *, at: datetime) -> EvidenceRef:
+        required = set(action["required_evidence_kinds"]) - {EvidenceType.TEST_RESULT.value}
+        available = {item["evidence_type"] for item in action["evidence"]}
+        if not required.issubset(available):
+            raise PermissionError("operator review cannot replace missing action evidence")
+        digest = evidence_digest(action["evidence"])
+        return EvidenceRef(
+            evidence_id="evidence_integrity_" + digest.split(":", 1)[1][:24],
+            evidence_type=EvidenceType.TEST_RESULT,
+            artifact_ref=f"reviewed-evidence-integrity:{digest}",
+            tenant_id="",
+            company_id="",
+            captured_at=at,
+            test_name=REVIEW_TEST,
+            test_passed=True,
+            issuer=self.verifier_id,
+            provenance={
+                "mode": "operator_review_plus_integrity_revalidation",
+                "evidence_digest": digest,
+            },
+        )
+
+
 class ResidentialCleaningFounderActionVerificationCapability(Capability):
     name = VERIFY_CAPABILITY
     version = "v1"
@@ -623,15 +682,17 @@ class ResidentialCleaningFounderActionVerificationCapability(Capability):
         self,
         company_brain: CompanyBrainService,
         verification: VerificationService,
-        verifier: DeterministicResidentialCleaningEvidenceVerifier,
+        verifier: DeterministicResidentialCleaningEvidenceVerifier | ResidentialCleaningReviewedEvidenceVerifier,
         runtime_repository: RuntimeRepository,
         clock: Callable[[], datetime],
+        evidence_reviews: ResidentialCleaningEvidenceReviewService | None = None,
     ) -> None:
         self.company_brain = company_brain
         self.verification = verification
         self.verifier = verifier
         self.runtime_repository = runtime_repository
         self.clock = clock
+        self.evidence_reviews = evidence_reviews
 
     def validate_request(self, request: CapabilityRequest) -> None:
         if request.capability != self.name or request.capability_version != self.version:
@@ -656,6 +717,8 @@ class ResidentialCleaningFounderActionVerificationCapability(Capability):
         if current is FounderActionStage.VERIFIED:
             try:
                 self._revalidate_sources(scope, definition, data, now)
+                if self.evidence_reviews is not None:
+                    self.evidence_reviews.verification_evidence(scope, action.record_id, data, at=now)
             except PermissionError:
                 sources_current = False
             else:
@@ -675,6 +738,11 @@ class ResidentialCleaningFounderActionVerificationCapability(Capability):
             raise PermissionError("result must be captured before verification")
 
         self._revalidate_sources(scope, definition, data, now)
+        review_evidence = (
+            self.evidence_reviews.verification_evidence(scope, action.record_id, data, at=now)
+            if self.evidence_reviews is not None
+            else ()
+        )
         test_evidence = self.verifier.review(data, at=now)
         test_evidence = EvidenceRef(
             **{
@@ -683,7 +751,7 @@ class ResidentialCleaningFounderActionVerificationCapability(Capability):
                 "company_id": scope.company_id,
             }
         )
-        evidence = tuple(self._evidence_ref(scope, item) for item in data["evidence"])
+        evidence = tuple(self._evidence_ref(scope, item) for item in data["evidence"]) + review_evidence
         try:
             verification = self.verification.get(
                 scope.tenant_id, scope.company_id, verification_id

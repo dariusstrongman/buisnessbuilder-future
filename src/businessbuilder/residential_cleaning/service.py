@@ -39,11 +39,15 @@ from businessbuilder.identity.repository import IdentityRepository
 from businessbuilder.runtime import ApprovalMode, ApprovalState, Budget, JobStatus, Money
 from businessbuilder.runtime.orchestrator import JobOrchestrator
 from businessbuilder.runtime.storage import RuntimeRepository
-from businessbuilder.verification import VerificationService
+from businessbuilder.verification import EvidenceType, VerificationService
+from businessbuilder.access_broker.ports import ArtifactStorePort
 
 from .capability import ResidentialCleaningScopeCommitCapability, canonical_digest
 from .founder_actions import (
     DeterministicResidentialCleaningEvidenceVerifier,
+    DEFINITIONS_BY_ID,
+    FounderActionStage,
+    ResidentialCleaningReviewedEvidenceVerifier,
     ResidentialCleaningFounderActionTransitionCapability,
     ResidentialCleaningFounderActionVerificationCapability,
     TRANSITION_CAPABILITY,
@@ -51,6 +55,11 @@ from .founder_actions import (
     register_verification_definitions,
 )
 from .research import SUPPORTED_JURISDICTION, recommendation, research_packet
+from .evidence_review import (
+    MalwareScannerPort,
+    ResidentialCleaningEvidenceReviewService,
+    ReviewDecision,
+)
 
 
 SUPPORTED_RESPONSIBILITIES = frozenset(
@@ -85,6 +94,8 @@ class ResidentialCleaningJourneyService:
         clock: Callable[[], datetime],
         enable_test_checkout: bool = False,
         evidence_verifier: DeterministicResidentialCleaningEvidenceVerifier | None = None,
+        evidence_store: ArtifactStorePort | None = None,
+        malware_scanner: MalwareScannerPort | None = None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -97,7 +108,23 @@ class ResidentialCleaningJourneyService:
         self.id_factory = id_factory
         self.clock = clock
         self.enable_test_checkout = enable_test_checkout
-        self.evidence_verifier = evidence_verifier
+        self.evidence_reviews = (
+            ResidentialCleaningEvidenceReviewService(
+                repository=runtime_repository,
+                artifact_store=evidence_store,
+                principal_authority=principal_authority,
+                scanner=malware_scanner,
+                clock=clock,
+                id_factory=id_factory,
+            )
+            if evidence_store is not None
+            else None
+        )
+        self.evidence_verifier = evidence_verifier or (
+            ResidentialCleaningReviewedEvidenceVerifier()
+            if self.evidence_reviews is not None
+            else None
+        )
         register_verification_definitions(verification)
         registered = set(runtime.registry.list())
         if (ResidentialCleaningScopeCommitCapability.name, "v1") not in registered:
@@ -105,19 +132,232 @@ class ResidentialCleaningJourneyService:
         if (TRANSITION_CAPABILITY, "v1") not in registered:
             runtime.registry.register(
                 ResidentialCleaningFounderActionTransitionCapability(
-                    company_brain, runtime_repository, clock
+                    company_brain, runtime_repository, clock, self.evidence_reviews
                 )
             )
-        if evidence_verifier is not None and (VERIFY_CAPABILITY, "v1") not in registered:
+        if self.evidence_verifier is not None and (VERIFY_CAPABILITY, "v1") not in registered:
             runtime.registry.register(
                 ResidentialCleaningFounderActionVerificationCapability(
                     company_brain,
                     verification,
-                    evidence_verifier,
+                    self.evidence_verifier,
                     runtime_repository,
                     clock,
+                    self.evidence_reviews,
                 )
             )
+
+    def submit_evidence_upload(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        action_id: str,
+        evidence_type: str,
+        filename: str,
+        content_type: str,
+        content: bytes,
+        idempotency_key: str,
+        supersedes_submission_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self.evidence_reviews is None:
+            raise PermissionError("customer evidence storage is not configured")
+        verified = self._require_founder(principal)
+        action = self._record(Scope(verified.tenant_id, verified.company_id or ""), action_id)
+        if FounderActionStage(action.data["state"]) not in {
+            FounderActionStage.FOUNDER_COMPLETED,
+            FounderActionStage.RESULT_CAPTURED,
+            FounderActionStage.VERIFIED,
+        }:
+            raise PermissionError("founder must complete the prepared action before submitting evidence")
+        submission = self.evidence_reviews.submit_upload(
+            verified,
+            action_id=action_id,
+            evidence_type=evidence_type,
+            filename=filename,
+            content_type=content_type,
+            content=content,
+            idempotency_key=idempotency_key,
+            supersedes_submission_id=supersedes_submission_id,
+        )
+        return self.evidence_reviews.public_submission(submission)
+
+    def submit_evidence_reference(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        action_id: str,
+        evidence_type: str,
+        source: str,
+        reference: dict[str, Any],
+        idempotency_key: str,
+        supersedes_submission_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self.evidence_reviews is None:
+            raise PermissionError("customer evidence storage is not configured")
+        verified = self._require_founder(principal)
+        action = self._record(Scope(verified.tenant_id, verified.company_id or ""), action_id)
+        if FounderActionStage(action.data["state"]) not in {
+            FounderActionStage.FOUNDER_COMPLETED,
+            FounderActionStage.RESULT_CAPTURED,
+            FounderActionStage.VERIFIED,
+        }:
+            raise PermissionError("founder must complete the prepared action before submitting evidence")
+        submission = self.evidence_reviews.submit_reference(
+            verified,
+            action_id=action_id,
+            evidence_type=evidence_type,
+            source=source,
+            reference=reference,
+            idempotency_key=idempotency_key,
+            supersedes_submission_id=supersedes_submission_id,
+        )
+        return self.evidence_reviews.public_submission(submission)
+
+    def review_evidence(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        action_id: str,
+        submission_ids: list[str],
+        decision: str,
+        reason_code: str,
+        idempotency_key: str,
+        operator_notes: str | None = None,
+        requested_additional_evidence: list[str] | None = None,
+        supersedes_review_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self.evidence_reviews is None:
+            raise PermissionError("operator evidence review is not configured")
+        verified = self.principal_authority.verify(
+            principal, tenant_id=principal.tenant_id, company_id=principal.company_id or ""
+        )
+        review = self.evidence_reviews.review(
+            verified,
+            action_id=action_id,
+            submission_ids=submission_ids,
+            decision=decision,
+            reason_code=reason_code,
+            idempotency_key=idempotency_key,
+            operator_notes=operator_notes,
+            requested_additional_evidence=requested_additional_evidence,
+            supersedes_review_id=supersedes_review_id,
+        )
+        scope = Scope(verified.tenant_id, verified.company_id or "")
+        action = self._record(scope, action_id)
+        if review.decision is ReviewDecision.ACCEPTED and FounderActionStage(action.data["state"]) is FounderActionStage.FOUNDER_COMPLETED:
+            definition = DEFINITIONS_BY_ID[action_id]
+            required = set(definition.required_evidence) - {
+                EvidenceType.FOUNDER_ATTESTATION,
+                EvidenceType.TEST_RESULT,
+            }
+            available = set(self.evidence_reviews.accepted_evidence_types(
+                scope.tenant_id, scope.company_id, action_id
+            ))
+            if required.issubset(available):
+                self._capture_reviewed_evidence(
+                    scope,
+                    action_id,
+                    verified.user_id,
+                    idempotency_key,
+                )
+                action = self._record(scope, action_id)
+        if (
+            self.evidence_verifier is not None
+            and FounderActionStage(action.data["state"]) in {
+                FounderActionStage.RESULT_CAPTURED,
+                FounderActionStage.VERIFIED,
+            }
+        ):
+            try:
+                self.verify_founder_action_internal(
+                    tenant_id=scope.tenant_id,
+                    company_id=scope.company_id,
+                    action_id=action_id,
+                    idempotency_key=(
+                        "operator-review-verification:"
+                        + self._suffix(action_id, review.review_id, review.request_digest)
+                    ),
+                )
+            except (PermissionError, PilotConflict):
+                pass
+        current = self._record(scope, action_id)
+        return {
+            "review": self.evidence_reviews.public_review(review, True),
+            "founder_action": self._public_founder_action_with_evidence(current),
+        }
+
+    def issue_evidence_access(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        action_id: str,
+        submission_id: str,
+    ) -> dict[str, Any]:
+        if self.evidence_reviews is None:
+            raise PermissionError("customer evidence storage is not configured")
+        return self.evidence_reviews.issue_download(
+            principal, action_id=action_id, submission_id=submission_id
+        )
+
+    def evidence_state(self, principal: AuthenticatedPrincipal, *, action_id: str) -> dict[str, Any]:
+        if self.evidence_reviews is None:
+            return {"submissions": [], "reviews": [], "review_state": "pending_review"}
+        verified = self.principal_authority.verify(
+            principal, tenant_id=principal.tenant_id, company_id=principal.company_id or ""
+        )
+        self._record(Scope(verified.tenant_id, verified.company_id or ""), action_id)
+        return self.evidence_reviews.public_action_state(
+            verified.tenant_id, verified.company_id or "", action_id
+        )
+
+    def _capture_reviewed_evidence(
+        self,
+        scope: Scope,
+        action_id: str,
+        operator_id: str,
+        idempotency_key: str,
+    ) -> None:
+        assert self.evidence_reviews is not None
+        evidence_refs, review_ids = self.evidence_reviews.active_accepted_references(
+            scope.tenant_id, scope.company_id, action_id
+        )
+        inputs = {
+            "objective": "Capture current operator-reviewed residential-cleaning evidence",
+            "operation": "capture_reviewed_result",
+            "action_id": action_id,
+            "actor_id": operator_id,
+            "evidence_refs": evidence_refs,
+            "review_ids": list(review_ids),
+        }
+        job_key = f"cleaning-reviewed-evidence:{idempotency_key}"
+        existing = self.runtime_repository.get_job_by_idempotency(
+            scope.tenant_id, scope.company_id, job_key
+        )
+        if existing is not None and existing.inputs != inputs:
+            raise PilotConflict("review idempotency key was already used for different evidence")
+        budget_id = f"budget_review_{self._suffix(scope.company_id, idempotency_key)}"
+        if self.runtime_repository.get_budget(scope.tenant_id, scope.company_id, budget_id) is None:
+            self.runtime.budgets.create(
+                Budget(budget_id, scope.tenant_id, scope.company_id, Money("USD", 0)),
+                f"correlation_{self._suffix(idempotency_key)}",
+            )
+        job = self.runtime.create_job(
+            tenant_id=scope.tenant_id,
+            company_id=scope.company_id,
+            capability=TRANSITION_CAPABILITY,
+            inputs=inputs,
+            budget_ref=budget_id,
+            per_job_ceiling=Money("USD", 0),
+            idempotency_key=job_key,
+            correlation_id=f"correlation_{self._suffix(idempotency_key)}",
+            approval_mode=ApprovalMode.AUTONOMOUS,
+            job_id=f"job_review_{self._suffix(scope.company_id, idempotency_key)}",
+            provenance={"source": "authorized_operator_review", "action_id": action_id},
+        )
+        if job.status is not JobStatus.SUCCEEDED:
+            job = self.runtime.run(scope.tenant_id, scope.company_id, job.job_id)
+        if job.status is not JobStatus.SUCCEEDED:
+            raise PilotConflict("Runtime did not capture the reviewed evidence")
 
     def start(
         self,
@@ -472,6 +712,8 @@ class ResidentialCleaningJourneyService:
             raise ValueError("a canonical idempotency key of 16 through 160 characters is required")
         if operation not in {"explain", "launch", "founder_complete", "capture_result"}:
             raise ValueError("unsupported founder action operation")
+        if operation == "capture_result" and self.evidence_reviews is not None:
+            raise PermissionError("pilot evidence must pass customer submission and operator review")
         scope = Scope(verified.tenant_id, verified.company_id or "")
         action = self._record(scope, action_id)
         if action.kind is not RecordKind.FOUNDER_ACTION or not action_id.startswith("founder_action_cleaning_"):
@@ -531,7 +773,7 @@ class ResidentialCleaningJourneyService:
             raise PilotConflict("founder action transition was not completed")
         return self._public_founder_action(self._record(scope, action_id))
 
-    def verify_founder_action_test_only(
+    def verify_founder_action_internal(
         self,
         *,
         tenant_id: str,
@@ -539,7 +781,7 @@ class ResidentialCleaningJourneyService:
         action_id: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Internal deterministic proof adapter; intentionally not an HTTP route."""
+        """Internal Runtime/Verification path; intentionally not an HTTP route."""
         if self.evidence_verifier is None:
             raise PermissionError("no Business Builder evidence verifier is configured")
         if not _IDEMPOTENCY.fullmatch(idempotency_key):
@@ -580,6 +822,22 @@ class ResidentialCleaningJourneyService:
         if job.status is not JobStatus.SUCCEEDED:
             raise PilotConflict("Verification did not accept the founder action")
         return self._public_founder_action(self._record(scope, action_id))
+
+    def verify_founder_action_test_only(
+        self,
+        *,
+        tenant_id: str,
+        company_id: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Compatibility alias retained for the existing isolated proof suite."""
+        return self.verify_founder_action_internal(
+            tenant_id=tenant_id,
+            company_id=company_id,
+            action_id=action_id,
+            idempotency_key=idempotency_key,
+        )
 
     def project(self, principal: AuthenticatedPrincipal) -> dict[str, Any]:
         verified = self.principal_authority.verify(
@@ -659,7 +917,7 @@ class ResidentialCleaningJourneyService:
             },
             "order": order,
             "entitlements": entitlements,
-            "founder_actions": [self._public_founder_action(item) for item in founder_actions],
+            "founder_actions": [self._public_founder_action_with_evidence(item) for item in founder_actions],
         }
 
     def _activate_test_order(self, context: AuthorizationContext, order):
@@ -846,6 +1104,14 @@ class ResidentialCleaningJourneyService:
             **{key: value for key, value in record.data.items() if key in allowed},
             "version": record.version,
         }
+
+    def _public_founder_action_with_evidence(self, record) -> dict[str, Any]:
+        result = self._public_founder_action(record)
+        if self.evidence_reviews is not None and record.record_id in DEFINITIONS_BY_ID:
+            result["evidence_review"] = self.evidence_reviews.public_action_state(
+                record.scope.tenant_id, record.scope.company_id, record.record_id
+            )
+        return result
 
     @classmethod
     def _validate_responsibilities(cls, value: object) -> None:

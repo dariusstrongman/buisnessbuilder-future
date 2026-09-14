@@ -16,6 +16,9 @@ from .models import (
 
 
 def decode_broker_record(kind: str, data: dict):
+    if kind.startswith("cleaning_evidence_"):
+        from businessbuilder.residential_cleaning.evidence_review import decode_evidence_record
+        return decode_evidence_record(kind, data)
     if kind.startswith("live_canary_"):
         from businessbuilder.live_canary.serialization import decode_canary_record
         return decode_canary_record(kind, data)

@@ -86,6 +86,11 @@ For each known pilot action:
 - `POST .../{action_id}/complete`
 - `POST .../{action_id}/evidence`
 
+The customer-safe pilot composition supersedes the direct evidence call with
+the upload/reference and operator-review routes documented in
+`RESIDENTIAL_CLEANING_EVIDENCE_REVIEW.md`. When that composition is enabled,
+the direct call fails closed and cannot advance an action around review.
+
 All POST routes require a stable idempotency key and the current founder/OWNER.
 The evidence route accepts only bounded `artifact` and `provider_receipt`
 references. Caller-supplied actors, authorities, evidence classifications,
@@ -93,10 +98,13 @@ provider results, and verification results are not accepted.
 
 ## Test-only verifier and readiness
 
-`DeterministicResidentialCleaningEvidenceVerifier` exists only for local and
-isolated PostgreSQL proofs. Production composition does not enable it by
-default. The customer cannot invoke it, and it cannot replace missing founder,
-authority, or provider evidence.
+`DeterministicResidentialCleaningEvidenceVerifier` remains available only for
+legacy local and isolated PostgreSQL proofs. The customer cannot invoke it, and
+it cannot replace missing founder, authority, or provider evidence. The
+customer-safe composition instead uses
+`ResidentialCleaningReviewedEvidenceVerifier`, which will produce the defined
+integrity test only after the separate operator-review boundary has accepted
+the complete, current evidence set.
 
 Build Room projects the checklist, destination, missing evidence, captured
 references, timestamps, history, and Verification result from the real backing

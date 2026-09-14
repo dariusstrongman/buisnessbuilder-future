@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import binascii
 from datetime import datetime, timezone
 from http import HTTPStatus
 import re
@@ -89,6 +91,15 @@ _CLEANING_PILOT_ROUTE = re.compile(
 _CLEANING_FOUNDER_ACTION_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/founder-actions/"
     r"(founder_action_cleaning_[A-Za-z0-9_-]{1,100})(?:/(explain|launch|complete|evidence))?$"
+)
+_CLEANING_EVIDENCE_SUBMISSIONS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/founder-actions/"
+    r"(founder_action_cleaning_[A-Za-z0-9_-]{1,100})/evidence-submissions"
+    r"(?:/(cleaning_submission_[A-Za-z0-9_-]{1,100})(?:/(access))?)?$"
+)
+_CLEANING_EVIDENCE_REVIEWS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/founder-actions/"
+    r"(founder_action_cleaning_[A-Za-z0-9_-]{1,100})/evidence-reviews$"
 )
 _FORGED_AUTHORITY_HEADERS = frozenset(
     {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
@@ -367,6 +378,155 @@ class CustomerApi:
             )
             return ApiResponse(HTTPStatus.OK, {"company": self._company(principal)})
 
+        match = _CLEANING_EVIDENCE_SUBMISSIONS_ROUTE.fullmatch(path)
+        if match:
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, action_id, submission_id, access = match.groups()
+            principal = self._company_principal(
+                token, user.user_id, company_id, support, Permission.ACCESS_ARTIFACTS,
+                request_id, correlation_id,
+            )
+            try:
+                if access:
+                    self._method(method, "POST")
+                    values = self._object(body, allowed=frozenset())
+                    del values
+                    result = self.residential_cleaning.issue_evidence_access(
+                        principal, action_id=action_id, submission_id=submission_id or ""
+                    )
+                    return ApiResponse(HTTPStatus.OK, {"evidence_access": result})
+                if submission_id:
+                    self._method(method, "GET")
+                    state = self.residential_cleaning.evidence_state(principal, action_id=action_id)
+                    item = next(
+                        (candidate for candidate in state["submissions"]
+                         if candidate["submission_id"] == submission_id),
+                        None,
+                    )
+                    if item is None:
+                        raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+                    return ApiResponse(HTTPStatus.OK, {"evidence_submission": item})
+                if method == "GET":
+                    state = self.residential_cleaning.evidence_state(principal, action_id=action_id)
+                    return ApiResponse(HTTPStatus.OK, {"evidence_submissions": state["submissions"]})
+                self._method(method, "POST")
+                values = self._object(
+                    body,
+                    required={"idempotency_key", "source", "evidence_type"},
+                    allowed={
+                        "idempotency_key", "source", "evidence_type", "filename",
+                        "content_type", "content_base64", "reference",
+                        "supersedes_submission_id",
+                    },
+                )
+                source = self._short_string(values["source"], 80)
+                common = {
+                    "action_id": action_id,
+                    "evidence_type": self._short_string(values["evidence_type"], 80),
+                    "idempotency_key": self._short_string(values["idempotency_key"], 160),
+                    "supersedes_submission_id": (
+                        self._identifier(values["supersedes_submission_id"], "supersedes_submission_id")
+                        if values.get("supersedes_submission_id") is not None else None
+                    ),
+                }
+                if source == "file_upload":
+                    if not {"filename", "content_type", "content_base64"}.issubset(values) or "reference" in values:
+                        raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "file evidence fields are invalid")
+                    encoded = values["content_base64"]
+                    if not isinstance(encoded, str) or len(encoded) > 720_000:
+                        raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "encoded evidence is too large")
+                    try:
+                        content = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError):
+                        raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "evidence encoding is invalid") from None
+                    submission = self.residential_cleaning.submit_evidence_upload(
+                        principal,
+                        filename=self._short_string(values["filename"], 120),
+                        content_type=self._short_string(values["content_type"], 100),
+                        content=content,
+                        **common,
+                    )
+                else:
+                    if "reference" not in values or any(
+                        item in values for item in {"filename", "content_type", "content_base64"}
+                    ):
+                        raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "reference evidence fields are invalid")
+                    if not isinstance(values["reference"], dict):
+                        raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "reference must be an object")
+                    submission = self.residential_cleaning.submit_evidence_reference(
+                        principal, source=source, reference=dict(values["reference"]), **common
+                    )
+                return ApiResponse(HTTPStatus.CREATED, {"evidence_submission": submission})
+            except PermissionError:
+                self._audit_denial(
+                    principal.user_id, principal.tenant_id, company_id,
+                    Permission.ACCESS_ARTIFACTS.value, "evidence submission or access denied",
+                    request_id, correlation_id,
+                )
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted") from None
+            except RuntimeError:
+                raise ApiFailure(HTTPStatus.CONFLICT, "evidence_conflict", "evidence state conflicts with this request") from None
+
+        match = _CLEANING_EVIDENCE_REVIEWS_ROUTE.fullmatch(path)
+        if match:
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, action_id = match.groups()
+            principal = self._company_principal(
+                token, user.user_id, company_id, support, Permission.ACCESS_ARTIFACTS,
+                request_id, correlation_id,
+            )
+            try:
+                if method == "GET":
+                    state = self.residential_cleaning.evidence_state(principal, action_id=action_id)
+                    return ApiResponse(HTTPStatus.OK, {"evidence_reviews": state["reviews"]})
+                self._method(method, "POST")
+                values = self._object(
+                    body,
+                    required={"idempotency_key", "submission_ids", "decision", "reason_code"},
+                    allowed={
+                        "idempotency_key", "submission_ids", "decision", "reason_code",
+                        "operator_notes", "requested_additional_evidence", "supersedes_review_id",
+                    },
+                )
+                if not isinstance(values["submission_ids"], list) or not all(
+                    isinstance(item, str) for item in values["submission_ids"]
+                ):
+                    raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "submission_ids must be a list")
+                requested = values.get("requested_additional_evidence")
+                if requested is not None and (
+                    not isinstance(requested, list) or not all(isinstance(item, str) for item in requested)
+                ):
+                    raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "requested evidence must be a list")
+                result = self.residential_cleaning.review_evidence(
+                    principal,
+                    action_id=action_id,
+                    submission_ids=[self._identifier(item, "submission_id") for item in values["submission_ids"]],
+                    decision=self._short_string(values["decision"], 80),
+                    reason_code=self._short_string(values["reason_code"], 80),
+                    idempotency_key=self._short_string(values["idempotency_key"], 160),
+                    operator_notes=(
+                        self._short_string(values["operator_notes"], 500)
+                        if values.get("operator_notes") is not None else None
+                    ),
+                    requested_additional_evidence=requested,
+                    supersedes_review_id=(
+                        self._identifier(values["supersedes_review_id"], "supersedes_review_id")
+                        if values.get("supersedes_review_id") is not None else None
+                    ),
+                )
+                return ApiResponse(HTTPStatus.OK, result)
+            except PermissionError:
+                self._audit_denial(
+                    principal.user_id, principal.tenant_id, company_id,
+                    Permission.ACCESS_ARTIFACTS.value, "operator evidence review denied",
+                    request_id, correlation_id,
+                )
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted") from None
+            except RuntimeError:
+                raise ApiFailure(HTTPStatus.CONFLICT, "review_conflict", "review state conflicts with this request") from None
+
         match = _CLEANING_FOUNDER_ACTION_ROUTE.fullmatch(path)
         if match:
             if self.residential_cleaning is None:
@@ -402,6 +562,12 @@ class CustomerApi:
                 return ApiResponse(HTTPStatus.OK, {"founder_action": action})
             self._method(method, "POST")
             if operation == "evidence":
+                if getattr(self.residential_cleaning, "evidence_reviews", None) is not None:
+                    raise ApiFailure(
+                        HTTPStatus.CONFLICT,
+                        "evidence_submission_required",
+                        "use the customer-safe evidence submission and operator review workflow",
+                    )
                 values = self._object(
                     body,
                     required={"idempotency_key", "evidence_refs"},
@@ -907,6 +1073,13 @@ class CustomerApi:
         cleaning_action = _CLEANING_FOUNDER_ACTION_ROUTE.fullmatch(path)
         if cleaning_action:
             return ("POST",) if cleaning_action.group(3) else ("GET",)
+        cleaning_submission = _CLEANING_EVIDENCE_SUBMISSIONS_ROUTE.fullmatch(path)
+        if cleaning_submission:
+            if cleaning_submission.group(4):
+                return ("POST",)
+            return ("GET",) if cleaning_submission.group(3) else ("GET", "POST")
+        if _CLEANING_EVIDENCE_REVIEWS_ROUTE.fullmatch(path):
+            return ("GET", "POST")
         if path == "/api/v1/companies" or path == "/api/v1/orders":
             return ("GET", "POST")
         child = _COMPANY_CHILD_ROUTE.fullmatch(path)
@@ -1356,10 +1529,20 @@ class CustomerApi:
             "prepared_data", "destination", "evidence", "verification", "timestamps",
             "last_actor", "history", "action_key",
         }
-        return [
+        values = [
             {"founder_action_id": item.record_id, **{key: value for key, value in item.data.items() if key in allowed}, "version": item.version}
             for item in records
         ]
+        evidence_reviews = getattr(self.residential_cleaning, "evidence_reviews", None)
+        if evidence_reviews is not None:
+            for item in values:
+                if item["founder_action_id"].startswith("founder_action_cleaning_"):
+                    item["evidence_review"] = evidence_reviews.public_action_state(
+                        principal.tenant_id,
+                        principal.company_id or "",
+                        item["founder_action_id"],
+                    )
+        return values
 
     def _handoff(self, principal):
         records = self.verification.list_for_company(principal.tenant_id, principal.company_id or "")

@@ -56,6 +56,14 @@ payloads.
 | POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/launch` | current founder/OWNER | Runtime prepared handoff only |
 | POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/complete` | current founder/OWNER | Runtime founder attestation; never Verification |
 | POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence` | current founder/OWNER | Runtime scoped reference validation + Company Brain |
+| GET/POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence-submissions` | scoped artifact access; POST is current founder/OWNER only | private artifact store + existing Runtime/PostgreSQL broker records |
+| GET | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence-submissions/{submission_id}` | scoped artifact access | safe evidence metadata projection |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence-submissions/{submission_id}/access` | OWNER, ADMIN, or scoped SUPPORT | short-lived private artifact access after integrity/safety check |
+| GET/POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence-reviews` | scoped artifact access; POST requires scoped SUPPORT operator session | immutable operator review + Runtime + Verification |
+
+When customer-safe evidence review is configured, the older direct `evidence`
+transition returns a conflict and points callers to `evidence-submissions`; it
+cannot bypass quarantine or operator review.
 
 SUPPORT can only read within an active grant and impersonation-session scope.
 SUPPORT cannot approve, spend, change billing, perform handoff, or satisfy
