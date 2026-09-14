@@ -296,9 +296,11 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "real_external_action": False,
             "live_provider": False,
         }
-        required_true = [value for key, value in proof.items() if isinstance(value, bool)]
-        if not all(required_true):
-            raise AssertionError("secret/artifact broker staging proof invariant failed")
+        failed = [key for key, value in proof.items() if isinstance(value, bool) and not value]
+        if failed:
+            raise AssertionError(
+                "secret/artifact broker staging proof invariant failed: " + ",".join(failed)
+            )
         with app.runtime_repository.connection.cursor() as cursor:
             cursor.execute(
                 """INSERT INTO bb_cloud_proofs(proof_id, status, body, completed_at)
