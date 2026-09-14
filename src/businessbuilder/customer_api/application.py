@@ -353,7 +353,10 @@ class CustomerApi:
             if self.outbound_communications is None:
                 raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
             company_id, recipient_id, action = match.groups()
-            permission = Permission.MANAGE_COMMUNICATIONS if action in {"opt-out", "re-enable"} else Permission.VIEW_COMPANY_STATE
+            permission = Permission.MANAGE_COMMUNICATIONS if (
+                action in {"opt-out", "re-enable"}
+                or (action == "suppression" and method == "POST")
+            ) else Permission.VIEW_COMPANY_STATE
             principal = self._company_principal(token, user.user_id, company_id, support,
                 permission, request_id, correlation_id)
             if action == "opt-out":
@@ -372,6 +375,16 @@ class CustomerApi:
                     principal, tenant_id=principal.tenant_id, company_id=company_id,
                     recipient_id=recipient_id,
                     consent_provenance=self._identifier(values["consent_provenance"], "consent_provenance"),
+                )
+            elif action == "suppression" and method == "POST":
+                from businessbuilder.outbound_communications import SuppressionReason
+                values = self._object(body, required={"event_id", "reason"},
+                                      allowed={"event_id", "reason"})
+                recipient = self.outbound_communications.suppress(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    recipient_id=recipient_id,
+                    event_id=self._identifier(values["event_id"], "event_id"),
+                    reason=SuppressionReason(self._identifier(values["reason"], "reason")),
                 )
             else:
                 self._method(method, "GET")
@@ -567,6 +580,8 @@ class CustomerApi:
             return ("POST",) if provider.group(3) else ("GET",)
         recipient = _RECIPIENT_ROUTE.fullmatch(path)
         if recipient:
+            if recipient.group(3) == "suppression":
+                return ("GET", "POST")
             return ("POST",) if recipient.group(3) in {"opt-out", "re-enable"} else ("GET",)
         if (_COMMUNICATION_POLICY_ROUTE.fullmatch(path)
                 or _COMMUNICATIONS_ROUTE.fullmatch(path)

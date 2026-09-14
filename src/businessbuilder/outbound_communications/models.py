@@ -52,6 +52,18 @@ class SuppressionState(StrEnum):
     SUPPRESSED = "suppressed"
 
 
+class SuppressionReason(StrEnum):
+    RECIPIENT_OPT_OUT = "recipient_opt_out"
+    HARD_BOUNCE = "hard_bounce"
+    COMPLAINT = "complaint"
+    ADMIN = "admin_suppression"
+    ABUSE_SIGNAL = "abuse_signal"
+    LEGAL_BLOCK = "legal_compliance_block"
+    INVALID_ADDRESS = "invalid_address"
+    DISCONNECTED_RELATIONSHIP = "disconnected_relationship"
+    CUSTOMER_REQUEST = "customer_request"
+
+
 class CommunicationPurpose(StrEnum):
     REPLY_TO_INBOUND = "reply_to_inbound"
     QUOTE_RESPONSE = "quote_response"

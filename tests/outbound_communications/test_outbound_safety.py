@@ -15,6 +15,7 @@ from businessbuilder.outbound_communications import (
     ContentEvidence, DeliveryStatus, OutboundCommunicationSafety, PolicyOutcome,
     SuppressionState, VerifiedDeliveryEvent,
 )
+from businessbuilder.outbound_communications import SuppressionReason
 from businessbuilder.runtime import ArtifactRef, Event, Money
 from businessbuilder.agent_runtime import ModelPolicy, TriggerClass
 from businessbuilder.company_brain import EntityRef, Provenance, RecordKind, Scope
@@ -159,6 +160,20 @@ class OutboundCommunicationSafetyTests(broker_tests.BrokerTests):
                 envelope, operation="send_preapproved_reply",
                 secret_ref=self.job_secret_ref)
         self.assertEqual(0, self.provider.call_count)
+
+    def test_authorized_admin_suppression_is_durable_and_source_typed(self):
+        changed = self.safety.suppress(
+            self.principal, tenant_id=self.tenant.tenant_id,
+            company_id=self.company_id, recipient_id=self.recipient.recipient_id,
+            event_id="admin_suppression_0001", reason=SuppressionReason.LEGAL_BLOCK)
+        self.assertIs(SuppressionState.SUPPRESSED, changed.suppression_state)
+        self.assertEqual("legal_compliance_block", changed.suppression_reason)
+        with self.assertRaises(CommunicationDenied):
+            self.safety.suppress(
+                self.principal, tenant_id=self.tenant.tenant_id,
+                company_id=self.company_id, recipient_id=self.recipient.recipient_id,
+                event_id="forged_provider_suppression_0001",
+                reason=SuppressionReason.HARD_BOUNCE)
 
     def test_content_policy_denies_secrets_guarantees_discounts_and_templates(self):
         cases = (

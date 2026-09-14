@@ -19,7 +19,7 @@ from businessbuilder.company_brain import Scope
 from .models import (
     CommunicationPurpose, CommunicationRequest, ConsentState, ContactRelationship,
     ContentEvidence, DeliveryRecord, DeliveryStatus, DestinationType, PolicyDecision,
-    PolicyOutcome, RateLimitReservation, RecipientRecord, SuppressionState,
+    PolicyOutcome, RateLimitReservation, RecipientRecord, SuppressionReason, SuppressionState,
     VerifiedDeliveryEvent, normalize_email,
 )
 
@@ -344,6 +344,16 @@ class OutboundCommunicationSafety:
         verified = self._manage(principal, tenant_id, company_id)
         return self._suppress(tenant_id, company_id, recipient_id, event_id=event_id,
                               reason=reason, actor_id=verified.user_id, withdrawn=True)
+
+    def suppress(self, principal: AuthenticatedPrincipal, *, tenant_id: str,
+                 company_id: str, recipient_id: str, event_id: str,
+                 reason: SuppressionReason) -> RecipientRecord:
+        if reason in {SuppressionReason.HARD_BOUNCE, SuppressionReason.COMPLAINT,
+                      SuppressionReason.RECIPIENT_OPT_OUT}:
+            raise CommunicationDenied("provider or recipient suppression source is required")
+        verified = self._manage(principal, tenant_id, company_id)
+        return self._suppress(tenant_id, company_id, recipient_id, event_id=event_id,
+                              reason=reason.value, actor_id=verified.user_id)
 
     def explicitly_reenable(self, principal: AuthenticatedPrincipal, *, tenant_id: str,
                             company_id: str, recipient_id: str,

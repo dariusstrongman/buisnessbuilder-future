@@ -82,7 +82,7 @@ one-time durable claims. Replays return current state without a second mutation.
 | Method | Route | Authority |
 |---|---|---|
 | GET | `/api/v1/companies/{company_id}/recipients/{recipient_id}` | scoped company view |
-| GET | `.../recipients/{recipient_id}/suppression` | scoped company view |
+| GET, POST | `.../recipients/{recipient_id}/suppression` | view; OWNER/ADMIN create typed admin/legal/abuse suppression |
 | POST | `.../recipients/{recipient_id}/opt-out` | OWNER/ADMIN |
 | POST | `.../recipients/{recipient_id}/re-enable` | OWNER/ADMIN + explicit consent provenance |
 | GET | `/api/v1/companies/{company_id}/communication-policy` | scoped company view |
@@ -102,4 +102,3 @@ communications subsystem requires Darius approval for legal/jurisdictional conse
 rules, retention/PII handling, customer-facing consent and unsubscribe UX, reviewed
 content policy/evaluations, provider-specific bounce/complaint authenticity, abuse
 monitoring, operational alerting and an explicit live-send kill switch.
-

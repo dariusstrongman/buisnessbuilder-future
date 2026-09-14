@@ -54,6 +54,14 @@ class CommunicationApiStub:
                                  suppression_reason=None, opt_out_at=None)
         return self.recipient
 
+    def suppress(self, principal, **scope):
+        self.get_recipient(principal, tenant_id=scope["tenant_id"],
+                           company_id=scope["company_id"], recipient_id=scope["recipient_id"])
+        self.recipient = replace(self.recipient,
+            suppression_state=SuppressionState.SUPPRESSED,
+            suppression_reason=scope["reason"].value, updated_at=self.fixture.now)
+        return self.recipient
+
     def policy_status(self, principal, **scope):
         del principal, scope
         return {"version": "outbound-email.v1", "channel": "email",
@@ -110,6 +118,9 @@ class CommunicationsCustomerApiTests(unittest.TestCase):
             body={"consent_provenance": "explicit_reconsent"}).status)
         self.assertEqual(200, self.request("POST", f"{base}/re-enable", token=self.fixture.owner_token,
             body={"consent_provenance": "explicit_reconsent"}).status)
+        self.assertEqual(200, self.request("POST", f"{base}/suppression",
+            token=self.fixture.owner_token,
+            body={"event_id": "admin_suppress_001", "reason": "admin_suppression"}).status)
         response = self.request("DELETE", base, token=self.fixture.owner_token)
         self.assertEqual(405, response.status)
         self.assertEqual(("GET",), response.allow)
