@@ -147,6 +147,19 @@ class OutboundCommunicationSafetyTests(broker_tests.BrokerTests):
         self.assertIs(ConsentState.EXPLICIT, restored.consent_state)
         self.assertIs(SuppressionState.CLEAR, restored.suppression_state)
 
+    def test_unknown_consent_fails_closed_before_provider_access(self):
+        unknown = replace(self.recipient, consent_state=ConsentState.UNKNOWN,
+                          consent_at=None, updated_at=self.clock())
+        self.repository.save_broker_record(
+            "communication_recipient", unknown.recipient_id,
+            unknown.tenant_id, unknown.company_id, unknown)
+        envelope = self._envelope(self._submit(key="unknown-consent-0001"))
+        with self.assertRaises(CommunicationDenied):
+            self.broker.execute_provider_action(
+                envelope, operation="send_preapproved_reply",
+                secret_ref=self.job_secret_ref)
+        self.assertEqual(0, self.provider.call_count)
+
     def test_content_policy_denies_secrets_guarantees_discounts_and_templates(self):
         cases = (
             ("Your api_key=not-a-real-value", ContentEvidence()),
