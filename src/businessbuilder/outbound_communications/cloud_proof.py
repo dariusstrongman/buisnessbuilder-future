@@ -17,6 +17,10 @@ from businessbuilder.commercial import (
     NormalizedBillingEvent, SubscriptionStatus,
 )
 from businessbuilder.company_brain import Company, EntityRef, LifecycleState, Provenance, RecordKind, Scope
+from businessbuilder.communications_compliance import CommunicationsCompliance, ComplianceDenied
+from businessbuilder.communications_compliance.models import (
+    AbuseSignalType, AbuseThresholds, KillSwitchScope, RolloutTier,
+)
 from businessbuilder.identity import (
     AuthorizationContext, FakeDevAuthenticationProvider, IdentityService, SessionService,
 )
@@ -73,6 +77,18 @@ def run_staging_cloud_proof() -> dict[str, object]:
         clock=clock)
     safety = attach_outbound_communications(
         app, delivery_verifiers={provider.provider: provider}, clock=clock)
+    operator_context = object()
+    compliance = CommunicationsCompliance(
+        repository=app.runtime_repository, outbound_safety=safety,
+        principal_authority=app.principal_authority,
+        authorization=app.commercial.authorization, audit=app.runtime.audit,
+        clock=clock, id_factory=app.runtime.id_factory,
+        unsubscribe_signing_key=secrets.token_bytes(48),
+        abuse_thresholds=AbuseThresholds(warning=1, throttle=2, suspend=3,
+                                         emergency=4, window_seconds=3600),
+        operator_verifier=lambda value: "staging_operator" if value is operator_context else "",
+        sandbox_providers=frozenset({provider.provider}),
+    )
     try:
         ids = DeterministicIds()
         identity = IdentityService(app.identity_repository, id_factory=ids, clock=clock)
@@ -149,7 +165,28 @@ def run_staging_cloud_proof() -> dict[str, object]:
                 relationship=ContactRelationship.SERVICE_RECIPIENT,
                 consent_state=ConsentState.SERVICE_FOLLOWUP,
                 consent_provenance="completed_service", source_event_ref=events[2].event_id),
+            safety.register_from_canonical_event(
+                tenant_id=TENANT, company_id=COMPANY, destination="bounce@example.test",
+                relationship=ContactRelationship.INBOUND_CUSTOMER,
+                consent_state=ConsentState.CUSTOMER_INITIATED,
+                consent_provenance="canonical_inbound", source_event_ref=events[0].event_id),
+            safety.register_from_canonical_event(
+                tenant_id=TENANT, company_id=COMPANY, destination="complaint@example.test",
+                relationship=ContactRelationship.INBOUND_CUSTOMER,
+                consent_state=ConsentState.CUSTOMER_INITIATED,
+                consent_provenance="canonical_inbound", source_event_ref=events[0].event_id),
+            safety.register_from_canonical_event(
+                tenant_id=TENANT, company_id=COMPANY, destination="kill-switch@example.test",
+                relationship=ContactRelationship.INBOUND_CUSTOMER,
+                consent_state=ConsentState.CUSTOMER_INITIATED,
+                consent_provenance="canonical_inbound", source_event_ref=events[0].event_id),
         )
+        for recipient in recipients:
+            compliance.configure_jurisdiction(
+                principal, tenant_id=TENANT, company_id=COMPANY,
+                recipient_id=recipient.recipient_id, tenant_jurisdiction="US",
+                company_jurisdiction="US", recipient_jurisdiction="US",
+                source_ref="staging_company_profile")
 
         flows = (
             ("inbound", recipients[0], CommunicationPurpose.REPLY_TO_INBOUND,
@@ -206,9 +243,11 @@ def run_staging_cloud_proof() -> dict[str, object]:
             executed[0][1].to_payload())
         duplicate_result = app.worker.process_one(wait_seconds=20)
 
-        safety.opt_out(principal, tenant_id=TENANT, company_id=COMPANY,
-                       recipient_id=recipients[0].recipient_id,
-                       event_id="optout_staging_0001")
+        unsubscribe_token = compliance.issue_unsubscribe_token(
+            tenant_id=TENANT, company_id=COMPANY,
+            recipient_id=recipients[0].recipient_id)
+        unsubscribe_ok = compliance.unsubscribe(unsubscribe_token)
+        unsubscribe_replay_ok = compliance.unsubscribe(unsubscribe_token)
         suppressed_denied = _prepare_submit_deny(
             app, safety, connection, secret_ref, recipients[0], events[0],
             "suppressed-staging-0001", CommunicationPurpose.REPLY_TO_INBOUND,
@@ -225,6 +264,60 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "Please share another honest review.", ContentEvidence(),
             role="role_review_followup_assistant",
             action="send_preapproved_review_request")
+
+        # Authenticated provider bounce and complaint callbacks mutate only known sends.
+        callback_results = []
+        callback_forgery_denied = False
+        for name, recipient, status in (
+            ("bounce", recipients[3], DeliveryStatus.BOUNCED),
+            ("complaint", recipients[4], DeliveryStatus.COMPLAINED),
+        ):
+            request = safety.prepare_request(
+                tenant_id=TENANT, company_id=COMPANY, recipient_id=recipient.recipient_id,
+                purpose=CommunicationPurpose.REPLY_TO_INBOUND,
+                agent_role="role_inbox_assistant", capability="communications.email",
+                provider_connection_id=connection.connection_id,
+                runtime_idempotency_key=f"compliance-{name}-0001",
+                content="Safe sandbox reply.", context_ref=events[0].event_id)
+            job = _submit(app, secret_ref, request, events[0],
+                          "role_inbox_assistant", "send_preapproved_reply")
+            envelope = app.runtime_repository.get_agent_envelope(TENANT, COMPANY, job.job_id)
+            receipt = app.broker.execute_provider_action(
+                envelope, operation="send_preapproved_reply", secret_ref=secret_ref)
+            body, signature = provider.delivery_callback(
+                event_id=f"compliance_{name}_callback_001",
+                provider_request_id=receipt.provider_request_id, status=status)
+            if name == "bounce":
+                callback_forgery_denied = _denied(lambda: safety.handle_delivery_callback(
+                    provider_name=provider.provider, body=body, signature="forged"))
+            changed = safety.handle_delivery_callback(
+                provider_name=provider.provider, body=body, signature=signature)
+            replay = safety.handle_delivery_callback(
+                provider_name=provider.provider, body=body, signature=signature)
+            callback_results.append(changed.status is status and changed == replay)
+
+        # A queued job cannot bypass a switch engaged after admission.
+        kill_request = safety.prepare_request(
+            tenant_id=TENANT, company_id=COMPANY, recipient_id=recipients[5].recipient_id,
+            purpose=CommunicationPurpose.REPLY_TO_INBOUND,
+            agent_role="role_inbox_assistant", capability="communications.email",
+            provider_connection_id=connection.connection_id,
+            runtime_idempotency_key="compliance-kill-0001",
+            content="Safe sandbox reply.", context_ref=events[0].event_id)
+        kill_job = _submit(app, secret_ref, kill_request, events[0],
+                           "role_inbox_assistant", "send_preapproved_reply")
+        kill_envelope = app.runtime_repository.get_agent_envelope(TENANT, COMPANY, kill_job.job_id)
+        compliance.set_company_kill_switch(
+            principal, tenant_id=TENANT, company_id=COMPANY, engaged=True,
+            reason_code="staging_emergency_pause")
+        killed_queued_denied = _denied(lambda: app.broker.execute_provider_action(
+            kill_envelope, operation="send_preapproved_reply", secret_ref=secret_ref))
+        compliance.set_company_kill_switch(
+            principal, tenant_id=TENANT, company_id=COMPANY, engaged=False,
+            reason_code="staging_review_complete")
+        restored_receipt = app.broker.execute_provider_action(
+            kill_envelope, operation="send_preapproved_reply", secret_ref=secret_ref)
+        kill_restore_ok = restored_receipt.status.value == "succeeded"
 
         bulk_request = safety.prepare_request(
             tenant_id=TENANT, company_id=COMPANY, recipient_id=recipients[1].recipient_id,
@@ -272,6 +365,27 @@ def run_staging_cloud_proof() -> dict[str, object]:
             app.runtime_repository.get_agent_envelope(TENANT, COMPANY, revoked_job.job_id),
             operation="send_preapproved_reply", secret_ref=secret_ref))
 
+        # Retention removes operational PII while durable evidence survives.
+        erasure = compliance.request_erasure(
+            principal, tenant_id=TENANT, company_id=COMPANY,
+            recipient_id=recipients[1].recipient_id, reason="staging_erasure_request")
+        erased_recipient = safety.get_recipient(
+            principal, tenant_id=TENANT, company_id=COMPANY,
+            recipient_id=recipients[1].recipient_id)
+        consent_preserved = any(item.recipient_id == recipients[1].recipient_id
+            for item in app.runtime_repository.list_broker_records(
+                "communication_compliance_consent", TENANT, COMPANY))
+
+        # Test policy escalation is explicit and explainable.
+        compliance.record_abuse_signal(TENANT, COMPANY, AbuseSignalType.COMPLAINT,
+                                       "synthetic_complaint_threshold_002")
+        compliance.record_abuse_signal(TENANT, COMPANY, AbuseSignalType.COMPLAINT,
+                                       "synthetic_complaint_threshold_003")
+        abuse_switch = compliance._switch(KillSwitchScope.COMPANY, COMPANY)
+        live_tier_denied = _denied(lambda: compliance.set_rollout(
+            principal, tenant_id=TENANT, company_id=COMPANY,
+            tier=RolloutTier.GENERAL_LIVE))
+
         decisions = app.runtime_repository.list_broker_records(
             "communication_policy_decision", TENANT, COMPANY)
         deliveries = app.runtime_repository.list_broker_records(
@@ -310,6 +424,23 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "sandbox_provider_only": True,
             "runtime_authority": True,
             "bulk_sending_disabled": True,
+            "jurisdiction_policy_versioned": all(
+                item.policy_version == "communications-compliance.us-federal.v1"
+                for item in app.runtime_repository.list_broker_records(
+                    "communication_compliance_decision", TENANT, COMPANY)),
+            "unsubscribe_token_opaque_replay_safe": unsubscribe_ok and unsubscribe_replay_ok,
+            "verified_bounce_and_complaint": all(callback_results),
+            "forged_callback_denied": callback_forgery_denied,
+            "abuse_threshold_alert_and_suspend": bool(abuse_switch and abuse_switch.engaged),
+            "queued_send_kill_switch_denied": killed_queued_denied,
+            "authorized_kill_switch_restore": kill_restore_ok,
+            "erasure_pseudonymized_operational_pii": (
+                erasure.operational_pii_removed
+                and erased_recipient.normalized_destination.endswith("@redacted.example.test")),
+            "compliance_evidence_preserved": consent_preserved,
+            "rollout_sandbox_only": live_tier_denied and not compliance.live_send_enabled,
+            "operational_alerts_persisted": bool(app.runtime_repository.list_broker_records(
+                "communication_compliance_alert", TENANT, COMPANY)),
         }
         failed = [key for key, value in proof.items() if isinstance(value, bool) and not value]
         if failed:

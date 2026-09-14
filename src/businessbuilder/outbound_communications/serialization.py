@@ -8,6 +8,9 @@ from .models import (
 
 
 def decode_communication_record(kind: str, data: dict):
+    if kind.startswith("communication_compliance_"):
+        from businessbuilder.communications_compliance.serialization import decode_compliance_record
+        return decode_compliance_record(kind, data)
     if kind == "communication_recipient":
         data["destination_type"] = DestinationType(data["destination_type"])
         data["relationship"] = ContactRelationship(data["relationship"])

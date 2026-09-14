@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 6
+MIGRATION_VERSION = 7
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -198,6 +198,9 @@ CREATE TABLE IF NOT EXISTS bb_broker_records (
 );
 CREATE INDEX IF NOT EXISTS bb_broker_records_scope
     ON bb_broker_records (tenant_id, company_id, kind, record_id);
+CREATE INDEX IF NOT EXISTS bb_communications_compliance_scope
+    ON bb_broker_records (tenant_id, company_id, kind, record_id)
+    WHERE kind LIKE 'communication_compliance_%';
 CREATE TABLE IF NOT EXISTS bb_provider_receipts (
     receipt_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,

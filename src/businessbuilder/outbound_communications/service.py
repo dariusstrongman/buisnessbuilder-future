@@ -138,6 +138,7 @@ class OutboundCommunicationSafety:
         self.delivery_verifiers = delivery_verifiers or {}
         self.limits = limits or _LIMITS
         self.company_brain = company_brain
+        self.compliance = None
 
     def register_from_canonical_event(
         self,
@@ -168,6 +169,9 @@ class OutboundCommunicationSafety:
             current.risk_flags if current else (), current.created_at if current else now, now,
         )
         self.repository.save_broker_record("communication_recipient", rid, tenant_id, company_id, recipient)
+        if self.compliance is not None:
+            self.compliance.classify_recipient(recipient)
+            self.compliance.record_canonical_consent(recipient, source_event_ref=source_event_ref)
         self._audit(tenant_id, company_id, "canonical_event", "communication.recipient.registered",
                     "recipient", rid, "canonical recipient context registered",
                     {"source_event_ref": source_event_ref, "relationship": relationship.value,
@@ -226,6 +230,8 @@ class OutboundCommunicationSafety:
             context_ref, approval_ref, bulk_count, now, now + expires_in,
             evidence.sensitive_or_high_impact,
         )
+        if self.compliance is not None:
+            self.compliance.evaluate_admission(value)
         self.repository.save_broker_record("communication_request", communication_id,
                                            tenant_id, company_id, value)
         return value
@@ -254,6 +260,8 @@ class OutboundCommunicationSafety:
                 raise CommunicationDenied("recipient is outside Runtime scope")
             self._recipient_policy(communication, recipient)
             self._provider_health(communication)
+            if self.compliance is not None:
+                self.compliance.evaluate_execution(envelope, communication, recipient)
             reservation = RateLimitReservation(
                 stable_id("send_reservation", communication.communication_id),
                 envelope.tenant_id, envelope.company_id, recipient.recipient_id,
@@ -360,6 +368,8 @@ class OutboundCommunicationSafety:
                             consent_provenance: str) -> RecipientRecord:
         verified = self._manage(principal, tenant_id, company_id)
         current = self._recipient(tenant_id, company_id, recipient_id)
+        if self.compliance is not None:
+            self.compliance.validate_reenable(current)
         now = self.clock()
         changed = replace(current, consent_state=ConsentState.EXPLICIT,
                           consent_provenance=consent_provenance, consent_at=now,
@@ -367,6 +377,9 @@ class OutboundCommunicationSafety:
                           suppression_reason=None, opt_out_at=None, updated_at=now)
         self.repository.save_broker_record("communication_recipient", recipient_id,
                                            tenant_id, company_id, changed)
+        if self.compliance is not None:
+            self.compliance.record_authorized_reenable(
+                changed, actor_id=verified.user_id, consent_provenance=consent_provenance)
         self._audit(tenant_id, company_id, verified.user_id, "communication.recipient.reenabled",
                     "recipient", recipient_id, "explicit authorized re-enable",
                     {"consent_basis": "explicit", "consent_provenance": consent_provenance})
@@ -431,6 +444,8 @@ class OutboundCommunicationSafety:
                     "safe provider delivery state recorded",
                     {"communication_id": delivery.communication_id, "recipient_id": delivery.recipient_id,
                      "provider_receipt_id": receipt.receipt_id, "status": status.value})
+        if self.compliance is not None:
+            self.compliance.record_delivery_retention(delivery, receipt)
         return delivery
 
     def handle_delivery_callback(self, *, provider_name: str, body: bytes,
@@ -438,7 +453,12 @@ class OutboundCommunicationSafety:
         verifier = self.delivery_verifiers.get(provider_name)
         if verifier is None or not hasattr(verifier, "verify_delivery_callback"):
             raise CommunicationDenied("delivery callback verifier unavailable")
-        event: VerifiedDeliveryEvent = verifier.verify_delivery_callback(body=body, signature=signature)
+        try:
+            event: VerifiedDeliveryEvent = verifier.verify_delivery_callback(body=body, signature=signature)
+        except Exception:
+            if self.compliance is not None:
+                self.compliance.callback_verification_failed(provider_name)
+            raise CommunicationDenied("delivery callback authenticity denied")
         if event.provider != provider_name:
             raise CommunicationDenied("delivery callback provider mismatch")
         delivery = self._delivery_by_request(provider_name, event.provider_request_id)
@@ -476,6 +496,8 @@ class OutboundCommunicationSafety:
                     "authenticated provider delivery update",
                     {"recipient_id": changed.recipient_id, "status": changed.status.value,
                      "provider_event_id": event.event_id})
+        if self.compliance is not None:
+            self.compliance.handle_verified_delivery(changed, event)
         return changed
 
     def get_recipient(self, principal, *, tenant_id, company_id, recipient_id):
