@@ -1,10 +1,10 @@
 {
   "proof": "provider-connection-oauth-v1",
   "status": "passed",
-  "task_arn": "arn:aws:ecs:us-east-1:199949321335:task/businessbuilder-staging/2f33c5c0d14b4745ac0566cbea8455a1",
-  "task_definition": "arn:aws:ecs:us-east-1:199949321335:task-definition/businessbuilder-staging-provider-oauth-worker:3",
-  "image_digest": "sha256:791b1a486250d5a2b74eb50792c51453048aabae8f42ff17441be69bf9b2f095",
-  "completed_at": "2026-09-14T02:33:18.562Z",
+  "task_arn": "arn:aws:ecs:us-east-1:199949321335:task/businessbuilder-staging/489b0044b828433bbdc8621d91c7bd9e",
+  "task_definition": "arn:aws:ecs:us-east-1:199949321335:task-definition/businessbuilder-staging-provider-oauth-worker:4",
+  "image_digest": "sha256:3b0b55fa3cbb9e2e7cb8e27433adc25ec6269385ec6f247f374ae518206bb6e1",
+  "completed_at": "2026-09-14T02:45:27.771Z",
   "backend": "postgresql+sqs+secrets-manager+shared-fargate+sandbox-email",
   "assertions": {
     "oauth_connection_activated": true,

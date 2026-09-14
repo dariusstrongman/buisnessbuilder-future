@@ -13,7 +13,7 @@
   "containerDefinitions": [
     {
       "name": "provider-oauth-worker",
-      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:791b1a486250d5a2b74eb50792c51453048aabae8f42ff17441be69bf9b2f095",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:3b0b55fa3cbb9e2e7cb8e27433adc25ec6269385ec6f247f374ae518206bb6e1",
       "essential": true,
       "readonlyRootFilesystem": true,
       "linuxParameters": {"initProcessEnabled": true},
@@ -25,7 +25,7 @@
         {"name": "DB_HOST", "value": "businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com"},
         {"name": "DB_PORT", "value": "5432"},
         {"name": "DB_NAME", "value": "businessbuilder"},
-        {"name": "DB_SCHEMA", "value": "bb_provider_oauth_v1_r3"},
+        {"name": "DB_SCHEMA", "value": "bb_provider_oauth_v1_r4"},
         {"name": "DB_SSLMODE", "value": "require"},
         {"name": "JOB_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/199949321335/businessbuilder-staging-jobs"},
         {"name": "ARTIFACT_BUCKET", "value": "businessbuilder-staging-artifacts-199949321335-us-east-1"},
