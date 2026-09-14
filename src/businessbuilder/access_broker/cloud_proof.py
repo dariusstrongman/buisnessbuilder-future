@@ -293,8 +293,8 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "tenant_isolation": tenant_isolation,
             "audit_complete": audit_complete,
             "no_secret_locator_in_job_receipt_or_audit": no_secret_locator_persisted_in_job_receipt_or_audit,
-            "real_external_action": False,
-            "live_provider": False,
+            "no_real_external_action": True,
+            "test_provider_only": True,
         }
         failed = [key for key, value in proof.items() if isinstance(value, bool) and not value]
         if failed:
