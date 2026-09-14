@@ -17,12 +17,15 @@
       "Sid": "ExactFictionalCompanyArtifactPrefix",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject"],
-      "Resource": "arn:aws:s3:::businessbuilder-staging-artifacts-199949321335-us-east-1/tenant/tenant_broker_staging/company/company_broker_staging/*"
+      "Resource": [
+        "arn:aws:s3:::businessbuilder-staging-artifacts-199949321335-us-east-1/tenant/tenant_broker_staging/company/company_broker_staging/*",
+        "arn:aws:s3:::businessbuilder-staging-artifacts-199949321335-us-east-1/tenant/tenant_oauth_staging/company/company_oauth_staging/*"
+      ]
     },
     {
       "Sid": "ExactFakeProviderSecret",
       "Effect": "Allow",
-      "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+      "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"],
       "Resource": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-staging-broker-test-email-v1-osH5Ip"
     }
   ]

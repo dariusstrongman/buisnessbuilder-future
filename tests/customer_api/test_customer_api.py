@@ -9,6 +9,8 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock
+from urllib.parse import parse_qs, urlparse
 
 import staging_server
 
@@ -19,6 +21,9 @@ from businessbuilder.commercial import (
     RecordingCommercialEventSink,
     seed_default_catalog,
 )
+from businessbuilder.access_broker import InMemorySecretStore
+from businessbuilder.provider_connection import ProviderConnectionService, SandboxEmailProvider
+from businessbuilder.identity import AuthorizationPolicy
 from businessbuilder.company_brain import (
     Company,
     CompanyBrainService,
@@ -152,6 +157,32 @@ class CustomerApiTests(unittest.TestCase):
             id_factory=self.ids,
             clock=lambda: self.now,
         )
+        self.secret_store = InMemorySecretStore()
+        self.email_provider = SandboxEmailProvider(clock=lambda: self.now)
+        lifecycle_broker = Mock()
+        lifecycle_broker.register_external_account.side_effect = lambda value, actor_id: self.runtime_repository.save_broker_record(
+            "external_account", value.account_id, value.tenant_id, value.company_id, value)
+        lifecycle_broker.register_connection.side_effect = lambda value, actor_id: self.runtime_repository.save_broker_record(
+            "provider_connection", value.connection_id, value.tenant_id, value.company_id, value)
+        lifecycle_broker.register_credential_ref.side_effect = lambda value, actor_id: self.runtime_repository.save_broker_record(
+            "external_credential_ref", value.secret_ref, value.tenant_id, value.company_id, value)
+        lifecycle_broker.register_capability_grant.side_effect = lambda value, actor_id: self.runtime_repository.save_broker_record(
+            "capability_grant", value.grant_id, value.tenant_id, value.company_id, value)
+        def revoke(tenant_id, company_id, connection_id, *, status, reason, actor_id):
+            del actor_id
+            current = self.runtime_repository.get_broker_record("provider_connection", tenant_id, company_id, connection_id)
+            changed = replace(current, status=status, revoked_reason=reason, updated_at=self.now)
+            self.runtime_repository.save_broker_record("provider_connection", connection_id, tenant_id, company_id, changed)
+            return changed
+        lifecycle_broker.revoke_connection.side_effect = revoke
+        self.provider_connections = ProviderConnectionService(
+            repository=self.runtime_repository, principal_authority=self.authority,
+            authorization=AuthorizationPolicy(self.identity_repository), broker=lifecycle_broker,
+            secret_store=self.secret_store,
+            providers={self.email_provider.provider: self.email_provider},
+            audit=self.runtime.audit, clock=lambda: self.now, id_factory=self.ids,
+        )
+        self.api.provider_connections = self.provider_connections
 
     def tearDown(self) -> None:
         self.runtime_repository.close()
@@ -538,6 +569,55 @@ class CustomerApiTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_provider_connection_api_is_customer_safe_and_lifecycle_complete(self) -> None:
+        path = f"/api/v1/companies/{self.company_id}/provider-connections"
+        started = self.request("POST", path, token=self.owner_token, body={
+            "provider": "sandbox-email",
+            "redirect_uri": "https://app.example.test/oauth/callback",
+            "scopes": ["mail.read", "mail.send"],
+        })
+        self.assertEqual(201, started.status)
+        authorization = started.body["authorization"]
+        query = parse_qs(urlparse(authorization["authorization_url"]).query)
+        code = self.email_provider.issue_test_code(
+            code_challenge=query["code_challenge"][0],
+            redirect_uri="https://app.example.test/oauth/callback",
+            scopes=frozenset({"mail.read", "mail.send"}),
+        )
+        callback = self.request(
+            "POST", "/api/v1/provider-connections/oauth/callback",
+            token=self.owner_token,
+            body={"state": query["state"][0], "code": code,
+                  "pkce_verifier": authorization["pkce_verifier"],
+                  "redirect_uri": "https://app.example.test/oauth/callback"},
+        )
+        self.assertEqual(200, callback.status)
+        connection_id = callback.body["provider_connection"]["provider_connection_id"]
+        serialized = json.dumps(callback.body).lower()
+        for forbidden in ("secret_ref", "secret_locator", "access_token", "refresh_token", "arn:aws", "tenant_id"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(1, len(self.request("GET", path, token=self.owner_token).body["provider_connections"]))
+        status_path = f"{path}/{connection_id}"
+        self.assertEqual(200, self.request("GET", status_path, token=self.owner_token).status)
+        disconnected = self.request("POST", status_path + "/disconnect", token=self.owner_token, body={})
+        self.assertEqual("disconnected", disconnected.body["provider_connection"]["status"])
+        reconnect = self.request("POST", status_path + "/reconnect", token=self.owner_token,
+            body={"redirect_uri": "https://app.example.test/oauth/callback", "scopes": ["mail.read"]})
+        self.assertEqual(200, reconnect.status)
+
+    def test_provider_api_auth_scope_methods_and_member_boundary(self) -> None:
+        path = f"/api/v1/companies/{self.company_id}/provider-connections"
+        self.assertEqual(401, self.request("GET", path).status)
+        _, token = self._member(Role.MEMBER, "provider-member")
+        self.assertEqual(403, self.request("POST", path, token=token, body={
+            "provider": "sandbox-email",
+            "redirect_uri": "https://app.example.test/oauth/callback",
+            "scopes": ["mail.read"],
+        }).status)
+        self.assertEqual(404, self.request("GET",
+            "/api/v1/companies/company_not_owned/provider-connections", token=self.owner_token).status)
+        self.assertEqual(405, self.request("PUT", path, token=self.owner_token, body={}).status)
 
 
 if __name__ == "__main__":

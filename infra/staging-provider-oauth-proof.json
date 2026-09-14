@@ -1,0 +1,31 @@
+{
+  "proof": "provider-connection-oauth-v1",
+  "status": "passed",
+  "task_arn": "arn:aws:ecs:us-east-1:199949321335:task/businessbuilder-staging/2f33c5c0d14b4745ac0566cbea8455a1",
+  "task_definition": "arn:aws:ecs:us-east-1:199949321335:task-definition/businessbuilder-staging-provider-oauth-worker:3",
+  "image_digest": "sha256:791b1a486250d5a2b74eb50792c51453048aabae8f42ff17441be69bf9b2f095",
+  "completed_at": "2026-09-14T02:33:18.562Z",
+  "backend": "postgresql+sqs+secrets-manager+shared-fargate+sandbox-email",
+  "assertions": {
+    "oauth_connection_activated": true,
+    "pkce_and_state_validated": true,
+    "forged_state_denied": true,
+    "callback_replay_denied": true,
+    "wrong_company_denied": true,
+    "missing_scope_denied": true,
+    "token_refresh_rotated": true,
+    "runtime_authorized_sandbox_action": true,
+    "provider_receipt_persisted": true,
+    "duplicate_action_suppressed": true,
+    "revoked_connection_blocks": true,
+    "callback_forgery_denied": true,
+    "suspended_entitlement_denied": true,
+    "audit_complete": true,
+    "test_provider_only": true,
+    "no_real_email": true,
+    "revoked_fake_secret_tombstoned": true
+  },
+  "standing_resources_added": 0,
+  "existing_web_service_changed": false,
+  "failed_proof_images_and_schemas_removed": true
+}
