@@ -173,6 +173,7 @@ class ResidentialCleaningJourneyTests(unittest.TestCase):
     @staticmethod
     def _intake(company_name="Clear Day Cleaning"):
         return {
+            "starting_point": "idea",
             "idea": "Start a trustworthy residential cleaning company for busy households.",
             "founder_display_name": "Pilot Founder",
             "organization_name": f"{company_name} Organization",
@@ -188,6 +189,28 @@ class ResidentialCleaningJourneyTests(unittest.TestCase):
                 "owner_operated_at_launch": True,
             },
         }
+
+    def test_starting_point_is_persisted_and_strictly_validated(self) -> None:
+        intake = self._intake("Started Cleaning")
+        intake["starting_point"] = "started"
+        response = self.request(
+            "POST",
+            "/api/v1/pilots/residential-cleaning/intakes",
+            token=self.founder_token,
+            body={"idempotency_key": "cleaning-starting-point-0001", "intake": intake},
+        )
+        self.assertEqual(HTTPStatus.CREATED, response.status)
+        self.assertEqual("started", response.body["journey"]["intake"]["data"]["starting_point"])
+
+        forged = self._intake("Forged Starting Point")
+        forged["starting_point"] = "skip_authorization"
+        denied = self.request(
+            "POST",
+            "/api/v1/pilots/residential-cleaning/intakes",
+            token=self.founder_token,
+            body={"idempotency_key": "cleaning-starting-point-0002", "intake": forged},
+        )
+        self.assertEqual(HTTPStatus.BAD_REQUEST, denied.status)
 
     def request(self, method, path, *, token=None, body=None, headers=None):
         supplied = dict(headers or {})

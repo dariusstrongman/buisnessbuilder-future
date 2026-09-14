@@ -75,6 +75,7 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
             body={
                 "idempotency_key": "postgres-cleaning-pilot-0001",
                 "intake": {
+                    "starting_point": "started",
                     "idea": "Build a reliable residential cleaning service for busy Denton households.",
                     "founder_display_name": "PostgreSQL Founder",
                     "organization_name": "PostgreSQL Cleaning Organization",
@@ -93,6 +94,7 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
         )
         self.assertEqual(201, started.status)
         journey = started.body["journey"]
+        self.assertEqual("started", journey["intake"]["data"]["starting_point"])
         company_id = journey["company"]["company_id"]
         approved = application.handle(
             method="POST",
@@ -188,6 +190,7 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
             correlation_id="correlation_postgres_cleaning_restart",
         )
         self.assertEqual(200, status.status)
+        self.assertEqual("started", status.body["journey"]["intake"]["data"]["starting_point"])
         recovered = status.body["journey"]
         self.assertEqual("scope_committed", recovered["scope_commit"]["state"])
         self.assertEqual("succeeded", recovered["scope_commit"]["job_status"])

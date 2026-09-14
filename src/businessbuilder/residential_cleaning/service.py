@@ -994,10 +994,15 @@ class ResidentialCleaningJourneyService:
             "idea", "founder_display_name", "company_name", "organization_name",
             "country", "region", "locality", "service_radius_miles",
             "weekly_hours", "startup_budget_minor", "working_preferences",
+            "starting_point",
         }
         if set(value) - allowed:
             raise ValueError("intake contains unsupported fields")
         result: dict[str, Any] = {}
+        starting_point = value.get("starting_point", "idea")
+        if starting_point not in {"idea", "started", "existing", "running"}:
+            raise ValueError("starting_point is invalid")
+        result["starting_point"] = starting_point
         for key, limit in (
             ("idea", 2000),
             ("founder_display_name", 160),

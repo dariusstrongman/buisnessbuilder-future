@@ -65,6 +65,11 @@ When customer-safe evidence review is configured, the older direct `evidence`
 transition returns a conflict and points callers to `evidence-submissions`; it
 cannot bypass quarantine or operator review.
 
+The residential-cleaning intake accepts the flagship's four explicit starting
+points (`idea`, `started`, `existing`, and `running`). The selected value is
+validated and persisted in the canonical Company Brain intake record; it never
+changes authentication, tenant scope, role, approval, or Commercial authority.
+
 SUPPORT can only read within an active grant and impersonation-session scope.
 SUPPORT cannot approve, spend, change billing, perform handoff, or satisfy
 identity verification. Company identifiers and order identifiers are always
