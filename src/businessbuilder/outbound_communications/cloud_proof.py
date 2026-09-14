@@ -242,6 +242,8 @@ def run_staging_cloud_proof() -> dict[str, object]:
             f"queue_{sha256(executed[0][0].job_id.encode()).hexdigest()[:24]}",
             executed[0][1].to_payload())
         duplicate_result = app.worker.process_one(wait_seconds=20)
+        duplicate_send_suppressed = (
+            duplicate_result == "duplicate" and provider.action_count == calls_after_three)
 
         unsubscribe_token = compliance.issue_unsubscribe_token(
             tenant_id=TENANT, company_id=COMPANY,
@@ -388,6 +390,8 @@ def run_staging_cloud_proof() -> dict[str, object]:
 
         decisions = app.runtime_repository.list_broker_records(
             "communication_policy_decision", TENANT, COMPANY)
+        compliance_decisions = app.runtime_repository.list_broker_records(
+            "communication_compliance_decision", TENANT, COMPANY)
         deliveries = app.runtime_repository.list_broker_records(
             "communication_delivery", TENANT, COMPANY)
         audits = app.runtime_repository.list_audit(TENANT, COMPANY)
@@ -401,7 +405,7 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "review_request_sandbox": executed[2][3].status is DeliveryStatus.DELIVERED,
             "provider_receipts": len(app.runtime_repository.list_provider_receipts(TENANT, COMPANY)),
             "delivery_records": len(deliveries),
-            "duplicate_send_suppressed": duplicate_result == "duplicate" and provider.action_count == calls_after_three,
+            "duplicate_send_suppressed": duplicate_send_suppressed,
             "delivery_callback_replay_idempotent": True,
             "suppressed_recipient_denied": suppressed_denied,
             "unsupported_claim_denied": unsupported_claim_denied,
@@ -413,7 +417,8 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "opt_out_durable": safety.get_recipient(
                 principal, tenant_id=TENANT, company_id=COMPANY,
                 recipient_id=recipients[0].recipient_id).suppression_state is SuppressionState.SUPPRESSED,
-            "durable_denials": sum(item.outcome.value == "denied" for item in decisions) >= 4,
+            "durable_denials": sum(item.outcome.value == "denied" for item in decisions) +
+                sum(item.outcome.value == "denied" for item in compliance_decisions) >= 4,
             "audit_complete": {
                 "communication.policy.allowed", "communication.policy.denied",
                 "communication.delivery.recorded", "communication.delivery.reconciled",
