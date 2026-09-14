@@ -39,8 +39,17 @@ from businessbuilder.identity.repository import IdentityRepository
 from businessbuilder.runtime import ApprovalMode, ApprovalState, Budget, JobStatus, Money
 from businessbuilder.runtime.orchestrator import JobOrchestrator
 from businessbuilder.runtime.storage import RuntimeRepository
+from businessbuilder.verification import VerificationService
 
 from .capability import ResidentialCleaningScopeCommitCapability, canonical_digest
+from .founder_actions import (
+    DeterministicResidentialCleaningEvidenceVerifier,
+    ResidentialCleaningFounderActionTransitionCapability,
+    ResidentialCleaningFounderActionVerificationCapability,
+    TRANSITION_CAPABILITY,
+    VERIFY_CAPABILITY,
+    register_verification_definitions,
+)
 from .research import SUPPORTED_JURISDICTION, recommendation, research_packet
 
 
@@ -71,9 +80,11 @@ class ResidentialCleaningJourneyService:
         runtime_repository: RuntimeRepository,
         commercial: CommercialService,
         commercial_repository: CommercialRepository,
+        verification: VerificationService,
         id_factory: Callable[[str], str],
         clock: Callable[[], datetime],
         enable_test_checkout: bool = False,
+        evidence_verifier: DeterministicResidentialCleaningEvidenceVerifier | None = None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -82,12 +93,31 @@ class ResidentialCleaningJourneyService:
         self.runtime_repository = runtime_repository
         self.commercial = commercial
         self.commercial_repository = commercial_repository
+        self.verification = verification
         self.id_factory = id_factory
         self.clock = clock
         self.enable_test_checkout = enable_test_checkout
+        self.evidence_verifier = evidence_verifier
+        register_verification_definitions(verification)
         registered = set(runtime.registry.list())
         if (ResidentialCleaningScopeCommitCapability.name, "v1") not in registered:
             runtime.registry.register(ResidentialCleaningScopeCommitCapability(company_brain))
+        if (TRANSITION_CAPABILITY, "v1") not in registered:
+            runtime.registry.register(
+                ResidentialCleaningFounderActionTransitionCapability(
+                    company_brain, runtime_repository, clock
+                )
+            )
+        if evidence_verifier is not None and (VERIFY_CAPABILITY, "v1") not in registered:
+            runtime.registry.register(
+                ResidentialCleaningFounderActionVerificationCapability(
+                    company_brain,
+                    verification,
+                    evidence_verifier,
+                    runtime_repository,
+                    clock,
+                )
+            )
 
     def start(
         self,
@@ -395,7 +425,6 @@ class ResidentialCleaningJourneyService:
         if self.enable_test_checkout:
             order = self._activate_test_order(context, order)
 
-        self._generate_founder_actions(scope, verified.user_id, approval_id)
         grants = tuple(
             item
             for item in self.commercial_repository.get_current_entitlement_grants(
@@ -428,6 +457,129 @@ class ResidentialCleaningJourneyService:
                 expected_version=workflow.version,
             )
         return self.project(verified)
+
+    def transition_founder_action(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        action_id: str,
+        operation: str,
+        idempotency_key: str,
+        evidence_refs: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        verified = self._require_founder(principal)
+        if not _IDEMPOTENCY.fullmatch(idempotency_key):
+            raise ValueError("a canonical idempotency key of 16 through 160 characters is required")
+        if operation not in {"explain", "launch", "founder_complete", "capture_result"}:
+            raise ValueError("unsupported founder action operation")
+        scope = Scope(verified.tenant_id, verified.company_id or "")
+        action = self._record(scope, action_id)
+        if action.kind is not RecordKind.FOUNDER_ACTION or not action_id.startswith("founder_action_cleaning_"):
+            raise PermissionError("action is outside the residential-cleaning pilot")
+        inputs: dict[str, Any] = {
+            "objective": f"Advance residential-cleaning founder action: {operation}",
+            "operation": operation,
+            "action_id": action_id,
+            "actor_id": verified.user_id,
+            "evidence_refs": evidence_refs or [],
+        }
+        job_key = f"cleaning-action:{idempotency_key}"
+        existing = self.runtime_repository.get_job_by_idempotency(
+            scope.tenant_id, scope.company_id, job_key
+        )
+        if existing is not None and existing.inputs != inputs:
+            raise PilotConflict("idempotency key was already used for a different action command")
+        budget_id = f"budget_action_{self._suffix(scope.company_id, idempotency_key)}"
+        if self.runtime_repository.get_budget(scope.tenant_id, scope.company_id, budget_id) is None:
+            self.runtime.budgets.create(
+                Budget(budget_id, scope.tenant_id, scope.company_id, Money("USD", 0)),
+                f"correlation_{self._suffix(idempotency_key)}",
+            )
+        job = self.runtime.create_job(
+            tenant_id=scope.tenant_id,
+            company_id=scope.company_id,
+            capability=TRANSITION_CAPABILITY,
+            inputs=inputs,
+            budget_ref=budget_id,
+            per_job_ceiling=Money("USD", 0),
+            idempotency_key=job_key,
+            correlation_id=f"correlation_{self._suffix(idempotency_key)}",
+            approval_mode=(
+                ApprovalMode.FOUNDER_ONLY
+                if operation in {"founder_complete", "capture_result"}
+                else ApprovalMode.AUTONOMOUS
+            ),
+            job_id=f"job_action_{self._suffix(scope.company_id, idempotency_key)}",
+            provenance={"source": "authenticated_founder_action", "action_id": action_id},
+        )
+        if job.status is JobStatus.WAITING_APPROVAL:
+            approval_id = job.approval_ids[0]
+            approval = self.runtime_repository.get_approval(
+                scope.tenant_id, scope.company_id, approval_id
+            )
+            if approval and approval.state is ApprovalState.REQUESTED:
+                job = self.runtime.approve_job(
+                    tenant_id=scope.tenant_id,
+                    company_id=scope.company_id,
+                    job_id=job.job_id,
+                    approval_id=approval_id,
+                    principal=verified,
+                )
+        if job.status is not JobStatus.SUCCEEDED:
+            job = self.runtime.run(scope.tenant_id, scope.company_id, job.job_id)
+        if job.status is not JobStatus.SUCCEEDED:
+            raise PilotConflict("founder action transition was not completed")
+        return self._public_founder_action(self._record(scope, action_id))
+
+    def verify_founder_action_test_only(
+        self,
+        *,
+        tenant_id: str,
+        company_id: str,
+        action_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Internal deterministic proof adapter; intentionally not an HTTP route."""
+        if self.evidence_verifier is None:
+            raise PermissionError("no Business Builder evidence verifier is configured")
+        if not _IDEMPOTENCY.fullmatch(idempotency_key):
+            raise ValueError("a canonical idempotency key is required")
+        scope = Scope(tenant_id, company_id)
+        self._record(scope, action_id)
+        inputs = {
+            "objective": "Verify one captured residential-cleaning founder action",
+            "action_id": action_id,
+        }
+        job_key = f"cleaning-verification:{idempotency_key}"
+        existing = self.runtime_repository.get_job_by_idempotency(
+            tenant_id, company_id, job_key
+        )
+        if existing is not None and existing.inputs != inputs:
+            raise PilotConflict("idempotency key was already used for different evidence")
+        budget_id = f"budget_verify_{self._suffix(company_id, idempotency_key)}"
+        if self.runtime_repository.get_budget(tenant_id, company_id, budget_id) is None:
+            self.runtime.budgets.create(
+                Budget(budget_id, tenant_id, company_id, Money("USD", 0)),
+                f"correlation_{self._suffix(idempotency_key)}",
+            )
+        job = self.runtime.create_job(
+            tenant_id=tenant_id,
+            company_id=company_id,
+            capability=VERIFY_CAPABILITY,
+            inputs=inputs,
+            budget_ref=budget_id,
+            per_job_ceiling=Money("USD", 0),
+            idempotency_key=job_key,
+            correlation_id=f"correlation_{self._suffix(idempotency_key)}",
+            approval_mode=ApprovalMode.AUTONOMOUS,
+            job_id=f"job_verify_{self._suffix(company_id, idempotency_key)}",
+            provenance={"source": "deterministic_test_verifier", "action_id": action_id},
+        )
+        if job.status is not JobStatus.SUCCEEDED:
+            job = self.runtime.run(tenant_id, company_id, job.job_id)
+        if job.status is not JobStatus.SUCCEEDED:
+            raise PilotConflict("Verification did not accept the founder action")
+        return self._public_founder_action(self._record(scope, action_id))
 
     def project(self, principal: AuthenticatedPrincipal) -> dict[str, Any]:
         verified = self.principal_authority.verify(
@@ -577,60 +729,6 @@ class ResidentialCleaningJourneyService:
             expected_version=action.version,
         )
 
-    def _generate_founder_actions(
-        self, scope: Scope, user_id: str, scope_approval_id: str
-    ) -> None:
-        owner = EntityRef("user", user_id)
-        provenance = (
-            Provenance(
-                "approved_pilot_scope",
-                self._iso(self.clock()),
-                owner,
-                source_ref=f"runtime-approval://{scope_approval_id}",
-            ),
-        )
-        definitions = (
-            ("entity_admin", "Choose and complete the entity/admin path", "formation_or_registration", ["founder_attestation", "authority_confirmation"], True),
-            ("ein_tax_id", "Complete the EIN/tax-ID determination and application", "Internal Revenue Service", ["authority_confirmation"], True),
-            ("bank", "Open the founder-owned business bank account", "regulated_bank", ["provider_receipt", "founder_attestation"], True),
-            ("insurance", "Choose and verify appropriate business insurance", "licensed_insurance_provider", ["provider_receipt", "founder_confirmation"], True),
-            ("licenses_permits", "Confirm and complete required licenses and permits", "issuing_authorities", ["authority_confirmation"], True),
-            ("business_email", "Authorize the founder-owned business email provider", "email_provider", ["provider_receipt"], False),
-            ("crm", "Authorize the founder-owned CRM", "crm_provider", ["provider_receipt"], False),
-            ("scheduling", "Authorize the founder-owned scheduling/calendar provider", "scheduling_provider", ["provider_receipt"], False),
-            ("payments", "Authorize and verify the merchant payment provider", "payment_provider", ["provider_receipt", "founder_identity_verification"], True),
-            ("legal_name_address", "Confirm the legal name and business address", "founder", ["founder_attestation"], True),
-        )
-        for key, title, authority, evidence, critical in definitions:
-            self._ensure_record(
-                scope,
-                f"founder_action_cleaning_{key}",
-                RecordKind.FOUNDER_ACTION,
-                {
-                    "title": title,
-                    "reason": "This step requires founder or external authority and cannot be silently completed by Business Builder.",
-                    "instructions": [
-                        "Review the Business Builder preparation and current authority/provider requirements.",
-                        "Complete identity, signature, attestation, terms, or payment yourself where required.",
-                        "Return only a receipt or evidence reference; never provide passwords or raw credentials.",
-                    ],
-                    "risk": "high" if critical else "medium",
-                    "irreversible": critical,
-                    "state": "required",
-                    "selected": True,
-                    "critical": critical,
-                    "responsibility": "FOUNDER_ACTION",
-                    "partner_authority": "EXTERNAL_PROVIDER/AUTHORITY",
-                    "authority_target": authority,
-                    "required_evidence_kinds": evidence,
-                    "evidence_refs": [],
-                    "blocks": ["fully_set", *( ["ready"] if critical else [] )],
-                },
-                KnowledgeClass.FACT,
-                provenance,
-                owner,
-            )
-
     def _validate_intake(self, value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value, dict):
             raise ValueError("intake must be an object")
@@ -740,7 +838,8 @@ class ResidentialCleaningJourneyService:
             "title", "reason", "instructions", "risk", "irreversible", "state",
             "selected", "critical", "responsibility", "partner_authority",
             "authority_target", "required_evidence_kinds", "evidence_refs", "blocks",
-            "approval_id",
+            "approval_id", "prepared_data", "destination", "evidence", "verification",
+            "timestamps", "last_actor", "history", "action_key",
         }
         return {
             "founder_action_id": record.record_id,
@@ -774,3 +873,18 @@ class ResidentialCleaningJourneyService:
     @staticmethod
     def _parse_time(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def _require_founder(
+        self, principal: AuthenticatedPrincipal
+    ) -> AuthenticatedPrincipal:
+        verified = self.principal_authority.verify(
+            principal,
+            tenant_id=principal.tenant_id,
+            company_id=principal.company_id or "",
+        )
+        organization = self.identity_repository.get_organization(
+            verified.organization_id
+        )
+        if verified.role is not Role.OWNER or organization.owner_user_id != verified.user_id:
+            raise PermissionError("founder action requires the current founder/owner")
+        return verified

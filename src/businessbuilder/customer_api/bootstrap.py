@@ -50,6 +50,7 @@ def create_postgres_customer_api(
     communications_compliance=None,
     live_canary_readiness=None,
     enable_residential_cleaning_test_checkout: bool = False,
+    residential_cleaning_evidence_verifier=None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -95,9 +96,11 @@ def create_postgres_customer_api(
         runtime_repository=runtime_repository,
         commercial=commercial,
         commercial_repository=commercial_repository,
+        verification=verification,
         id_factory=random_id,
         clock=clock,
         enable_test_checkout=enable_residential_cleaning_test_checkout,
+        evidence_verifier=residential_cleaning_evidence_verifier,
     )
     return CustomerApi(
         identity_repository=identity_repository,

@@ -51,6 +51,11 @@ payloads.
 | POST | `/api/v1/pilots/residential-cleaning/intakes` | active authenticated founder; creates or reuses one OWNER organization | Identity + Company Brain + Runtime |
 | GET | `/api/v1/companies/{company_id}/residential-cleaning-pilot` | `view_company_state` | safe composition of Company Brain, Runtime, Commercial, and Verification |
 | POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/approve` | current OWNER/founder through signed principal | Runtime approval, then Company Brain and Commercial |
+| GET | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}` | `view_company_state` | Company Brain projection |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/explain` | current founder/OWNER | Runtime + Company Brain |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/launch` | current founder/OWNER | Runtime prepared handoff only |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/complete` | current founder/OWNER | Runtime founder attestation; never Verification |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/founder-actions/{action_id}/evidence` | current founder/OWNER | Runtime scoped reference validation + Company Brain |
 
 SUPPORT can only read within an active grant and impersonation-session scope.
 SUPPORT cannot approve, spend, change billing, perform handoff, or satisfy

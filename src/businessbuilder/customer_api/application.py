@@ -86,6 +86,10 @@ _CLEANING_PILOT_START_ROUTE = "/api/v1/pilots/residential-cleaning/intakes"
 _CLEANING_PILOT_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot(?:/(approve))?$"
 )
+_CLEANING_FOUNDER_ACTION_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/founder-actions/"
+    r"(founder_action_cleaning_[A-Za-z0-9_-]{1,100})(?:/(explain|launch|complete|evidence))?$"
+)
 _FORGED_AUTHORITY_HEADERS = frozenset(
     {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
 )
@@ -362,6 +366,95 @@ class CustomerApi:
                 request_id, correlation_id,
             )
             return ApiResponse(HTTPStatus.OK, {"company": self._company(principal)})
+
+        match = _CLEANING_FOUNDER_ACTION_ROUTE.fullmatch(path)
+        if match:
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, action_id, operation = match.groups()
+            permission = (
+                Permission.APPROVE_FOUNDER_DECISIONS
+                if operation is not None
+                else Permission.VIEW_COMPANY_STATE
+            )
+            principal = self._company_principal(
+                token,
+                user.user_id,
+                company_id,
+                support,
+                permission,
+                request_id,
+                correlation_id,
+            )
+            if operation is None:
+                self._method(method, "GET")
+                journey = self.residential_cleaning.project(principal)
+                action = next(
+                    (
+                        item
+                        for item in journey["founder_actions"]
+                        if item["founder_action_id"] == action_id
+                    ),
+                    None,
+                )
+                if action is None:
+                    raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+                return ApiResponse(HTTPStatus.OK, {"founder_action": action})
+            self._method(method, "POST")
+            if operation == "evidence":
+                values = self._object(
+                    body,
+                    required={"idempotency_key", "evidence_refs"},
+                    allowed={"idempotency_key", "evidence_refs"},
+                )
+                evidence_refs = values["evidence_refs"]
+                if not isinstance(evidence_refs, list):
+                    raise ApiFailure(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_request",
+                        "evidence_refs must be a list",
+                    )
+            else:
+                values = self._object(
+                    body,
+                    required={"idempotency_key"},
+                    allowed={"idempotency_key"},
+                )
+                evidence_refs = None
+            runtime_operation = {
+                "explain": "explain",
+                "launch": "launch",
+                "complete": "founder_complete",
+                "evidence": "capture_result",
+            }[operation]
+            try:
+                action = self.residential_cleaning.transition_founder_action(
+                    principal,
+                    action_id=action_id,
+                    operation=runtime_operation,
+                    idempotency_key=self._short_string(values["idempotency_key"], 160),
+                    evidence_refs=evidence_refs,
+                )
+            except PermissionError:
+                self._audit_denial(
+                    principal.user_id,
+                    principal.tenant_id,
+                    company_id,
+                    permission.value,
+                    "founder action transition denied",
+                    request_id,
+                    correlation_id,
+                )
+                raise ApiFailure(
+                    HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted"
+                ) from None
+            except RuntimeError:
+                raise ApiFailure(
+                    HTTPStatus.CONFLICT,
+                    "journey_conflict",
+                    "founder action state conflicts with this request",
+                ) from None
+            return ApiResponse(HTTPStatus.OK, {"founder_action": action})
 
         match = _CLEANING_PILOT_ROUTE.fullmatch(path)
         if match:
@@ -811,6 +904,9 @@ class CustomerApi:
         cleaning_pilot = _CLEANING_PILOT_ROUTE.fullmatch(path)
         if cleaning_pilot:
             return ("POST",) if cleaning_pilot.group(2) == "approve" else ("GET",)
+        cleaning_action = _CLEANING_FOUNDER_ACTION_ROUTE.fullmatch(path)
+        if cleaning_action:
+            return ("POST",) if cleaning_action.group(3) else ("GET",)
         if path == "/api/v1/companies" or path == "/api/v1/orders":
             return ("GET", "POST")
         child = _COMPANY_CHILD_ROUTE.fullmatch(path)
@@ -1257,6 +1353,8 @@ class CustomerApi:
             "required_evidence_kinds", "evidence_refs", "due_at", "critical",
             "selected", "responsibility", "partner_authority", "authority_target",
             "blocks", "approval_id",
+            "prepared_data", "destination", "evidence", "verification", "timestamps",
+            "last_actor", "history", "action_key",
         }
         return [
             {"founder_action_id": item.record_id, **{key: value for key, value in item.data.items() if key in allowed}, "version": item.version}

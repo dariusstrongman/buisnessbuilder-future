@@ -15,6 +15,8 @@ from businessbuilder.company_brain import (
 from businessbuilder.company_brain.errors import NotFoundError
 from businessbuilder.runtime import ArtifactRef, Capability, CapabilityRequest, CapabilityResult, Money
 
+from .founder_actions import FOUNDER_ACTION_DEFINITIONS, prepared_action_data
+
 
 def canonical_digest(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -30,8 +32,14 @@ class ResidentialCleaningVerificationRouter:
     def request_verification(self, **request) -> None:
         artifacts = request.get("artifact_refs", ())
         if any(
-            item.get("type") == "company_brain_record"
-            and item.get("id") == "decision_cleaning_build_scope"
+            (
+                item.get("type") == "company_brain_record"
+                and item.get("id") == "decision_cleaning_build_scope"
+            )
+            or item.get("type") in {
+                "pilot_founder_action_state",
+                "pilot_founder_action_verification",
+            }
             for item in artifacts
         ):
             return
@@ -128,6 +136,21 @@ class ResidentialCleaningScopeCommitCapability(Capability):
             {**approved["starting_price_logic"], "approved": True},
             KnowledgeClass.FOUNDER_DECISION, provenance, owner,
         )
+        for action in FOUNDER_ACTION_DEFINITIONS:
+            self._ensure_record(
+                scope,
+                action.action_id,
+                RecordKind.FOUNDER_ACTION,
+                prepared_action_data(
+                    action,
+                    company_id=scope.company_id,
+                    prepared_at=self.company_brain.get_company(scope).updated_at,
+                    actor_id=request.job_id,
+                ),
+                KnowledgeClass.FACT,
+                provenance,
+                owner,
+            )
         company = self.company_brain.get_company(scope)
         if company.lifecycle is LifecycleState.CHALLENGED:
             company = self.company_brain.transition_company(

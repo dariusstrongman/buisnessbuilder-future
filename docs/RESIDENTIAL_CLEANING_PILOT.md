@@ -51,11 +51,12 @@ only:
 - `EXTERNAL_PROVIDER/AUTHORITY`
 
 Founder Actions cover entity/administrative setup, EIN or tax-ID handling,
-banking, insurance, licenses and permits, business email, CRM, scheduling,
-payments, legal name/address confirmation, and the pilot-specific scope
-approval. Actions remain `required` with empty evidence until an authority
-records evidence. The scope approval becomes `verified` only with its durable
-Runtime approval reference.
+banking, insurance, licenses and permits, domain ownership, business email,
+CRM, scheduling, payments, legal name/address confirmation, and the
+pilot-specific scope approval. Actions begin `prepared` with empty evidence and
+follow the evidence-gated flow documented in
+`RESIDENTIAL_CLEANING_FOUNDER_ACTIONS.md`. The scope approval becomes
+`verified` only with its durable Runtime approval reference.
 
 ## Research boundary
 

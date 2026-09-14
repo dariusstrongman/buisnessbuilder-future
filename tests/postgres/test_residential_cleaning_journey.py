@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 import os
 import unittest
 from uuid import uuid4
 
 from businessbuilder.customer_api.bootstrap import create_postgres_customer_api
+from businessbuilder.access_broker import (
+    ArtifactClassification,
+    ArtifactRecord,
+    ArtifactStatus,
+)
 from businessbuilder.identity import (
     FakeDevAuthenticationProvider,
     IdentityService,
@@ -13,6 +19,9 @@ from businessbuilder.identity import (
 )
 from businessbuilder.postgres import PostgresIdentityRepository
 from businessbuilder.runtime.ids import DeterministicIds
+from businessbuilder.residential_cleaning import (
+    DeterministicResidentialCleaningEvidenceVerifier,
+)
 
 
 NOW = datetime(2026, 9, 14, 16, 0, tzinfo=timezone.utc)
@@ -49,6 +58,7 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
             schema=schema,
             clock=lambda: NOW,
             enable_residential_cleaning_test_checkout=True,
+            residential_cleaning_evidence_verifier=DeterministicResidentialCleaningEvidenceVerifier(),
         )
         headers = {"Authorization": f"Bearer {token}"}
         started = application.handle(
@@ -91,6 +101,68 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
         self.assertEqual("succeeded", approved.body["journey"]["scope_commit"]["job_status"])
         self.assertEqual("fulfillment_pending", approved.body["journey"]["order"]["status"])
         self.assertFalse(approved.body["journey"]["verification"]["ready"])
+        tenant_id = application.identity_repository.list_user_memberships(
+            founder.user_id
+        )[0].tenant_id
+        action_id = "founder_action_cleaning_entity_admin"
+        for operation in ("explain", "launch", "complete"):
+            advanced = application.handle(
+                method="POST",
+                path=(
+                    f"/api/v1/companies/{company_id}/residential-cleaning-pilot/"
+                    f"founder-actions/{action_id}/{operation}"
+                ),
+                headers=headers,
+                query={},
+                body={"idempotency_key": f"postgres-entity-{operation}-0001"},
+                request_id=f"request_postgres_entity_{operation}",
+                correlation_id="correlation_postgres_entity",
+            )
+            self.assertEqual(200, advanced.status)
+        artifact_id = "artifact_postgres_entity_authority"
+        content_hash = sha256(artifact_id.encode()).hexdigest()
+        application.runtime_repository.save_broker_record(
+            "artifact",
+            artifact_id,
+            tenant_id,
+            company_id,
+            ArtifactRecord(
+                artifact_id=artifact_id,
+                tenant_id=tenant_id,
+                company_id=company_id,
+                object_key=f"tenant/{tenant_id}/company/{company_id}/artifacts/{artifact_id}/{content_hash}",
+                content_sha256=content_hash,
+                content_type="application/pdf",
+                size_bytes=128,
+                classification=ArtifactClassification.VERIFICATION_EVIDENCE,
+                status=ArtifactStatus.AVAILABLE,
+                provenance_ref="verified_authority:texas_secretary_of_state",
+                created_at=NOW,
+            ),
+        )
+        captured = application.handle(
+            method="POST",
+            path=(
+                f"/api/v1/companies/{company_id}/residential-cleaning-pilot/"
+                f"founder-actions/{action_id}/evidence"
+            ),
+            headers=headers,
+            query={},
+            body={
+                "idempotency_key": "postgres-entity-evidence-0001",
+                "evidence_refs": [{"kind": "artifact", "reference": artifact_id}],
+            },
+            request_id="request_postgres_entity_evidence",
+            correlation_id="correlation_postgres_entity",
+        )
+        self.assertEqual(200, captured.status)
+        verified = application.residential_cleaning.verify_founder_action_test_only(
+            tenant_id=tenant_id,
+            company_id=company_id,
+            action_id=action_id,
+            idempotency_key="postgres-entity-verification-0001",
+        )
+        self.assertEqual("verified", verified["state"])
         application.close()
 
         restarted = create_postgres_customer_api(
@@ -115,11 +187,19 @@ class PostgresResidentialCleaningJourneyTests(unittest.TestCase):
         self.assertEqual("succeeded", recovered["scope_commit"]["job_status"])
         self.assertEqual("fulfillment_pending", recovered["order"]["status"])
         self.assertGreaterEqual(
-            len([item for item in recovered["founder_actions"] if item["state"] == "required"]),
+            len([item for item in recovered["founder_actions"] if item["state"] == "prepared"]),
             10,
         )
         self.assertFalse(recovered["verification"]["ready"])
         self.assertFalse(recovered["verification"]["fully_set"])
+        recovered_action = next(
+            item for item in recovered["founder_actions"]
+            if item["founder_action_id"] == action_id
+        )
+        self.assertEqual("verified", recovered_action["state"])
+        self.assertEqual("accepted", recovered_action["verification"]["result"])
+        self.assertGreaterEqual(len(recovered_action["history"]), 6)
+        self.assertEqual(2, len(recovered_action["evidence"] if recovered_action.get("evidence") else []))
         restarted.close()
 
 
