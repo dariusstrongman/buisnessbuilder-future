@@ -41,6 +41,7 @@ def create_postgres_customer_api(
     signing_key: bytes,
     dsn: str | None = None,
     schema: str | None = None,
+    provider_connections=None,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
     if len(signing_key) < 32:
@@ -75,6 +76,7 @@ def create_postgres_customer_api(
         RuntimeCommercialEventSink(runtime.events),
         id_factory=random_id,
         clock=utc_now,
+        provider_connections=provider_connections,
     )
     seed_default_catalog(commercial_repository, effective_at=utc_now())
     return CustomerApi(

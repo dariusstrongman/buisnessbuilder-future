@@ -45,6 +45,12 @@ _APPROVAL_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/approvals/([A-Za-z0-9_-]{1,128})$"
 )
 _ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
+_PROVIDER_CONNECTIONS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections$"
+)
+_PROVIDER_CONNECTION_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections/([A-Za-z0-9_-]{1,160})(?:/(disconnect|reconnect))?$"
+)
 _FORGED_AUTHORITY_HEADERS = frozenset(
     {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
 )
@@ -91,6 +97,7 @@ class CustomerApi:
         commercial_repository: CommercialRepository,
         id_factory: Callable[[str], str],
         clock: Callable[[], datetime],
+        provider_connections=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -104,6 +111,7 @@ class CustomerApi:
         self.commercial_repository = commercial_repository
         self.id_factory = id_factory
         self.clock = clock
+        self.provider_connections = provider_connections
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -193,6 +201,22 @@ class CustomerApi:
             )
 
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        if path == "/api/v1/provider-connections/oauth/callback":
+            self._method(method, "POST")
+            if self.provider_connections is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            values = self._object(body, required={"state", "code", "pkce_verifier", "redirect_uri"},
+                                  allowed={"state", "code", "pkce_verifier", "redirect_uri"})
+            # The state selects server-owned scope; no callback tenant/company is accepted.
+            connection = self.provider_connections.complete(
+                token,
+                state=self._short_string(values["state"], 200),
+                code=self._short_string(values["code"], 500),
+                pkce_verifier=self._short_string(values["pkce_verifier"], 200),
+                redirect_uri=self._short_string(values["redirect_uri"], 500),
+            )
+            return ApiResponse(HTTPStatus.OK, {"provider_connection": self._provider_connection(connection)})
+
         if path == "/api/v1/me":
             self._method(method, "GET")
             return ApiResponse(HTTPStatus.OK, {"user": self._user(user)})
@@ -229,6 +253,86 @@ class CustomerApi:
                 request_id, correlation_id,
             )
             return ApiResponse(HTTPStatus.OK, {"company": self._company(principal)})
+
+        match = _PROVIDER_CONNECTIONS_ROUTE.fullmatch(path)
+        if match:
+            if self.provider_connections is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id = match.group(1)
+            permission = (Permission.VIEW_COMPANY_STATE if method == "GET"
+                          else Permission.MANAGE_PROVIDER_CONNECTIONS)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                permission, request_id, correlation_id)
+            if method == "GET":
+                values = self.provider_connections.list_connections(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id
+                )
+                return ApiResponse(HTTPStatus.OK, {"provider_connections": [
+                    self._provider_connection(item) for item in values
+                ]})
+            self._method(method, "GET", "POST")
+            values = self._object(body, required={"provider", "redirect_uri", "scopes"},
+                                  allowed={"provider", "redirect_uri", "scopes"})
+            scopes = values["scopes"]
+            if not isinstance(scopes, list) or not scopes or any(not isinstance(item, str) for item in scopes):
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "scopes must be a non-empty list")
+            started = self.provider_connections.start(
+                principal, tenant_id=principal.tenant_id, company_id=company_id,
+                provider_name=self._identifier(values["provider"], "provider"),
+                redirect_uri=self._short_string(values["redirect_uri"], 500),
+                scopes=frozenset(scopes),
+            )
+            return ApiResponse(HTTPStatus.CREATED, {"authorization": {
+                "provider_connection_id": started.connection_id,
+                "authorization_url": started.authorization_url,
+                "pkce_verifier": started.pkce_verifier,
+                "expires_at": self._time(started.expires_at),
+            }})
+
+        match = _PROVIDER_CONNECTION_ROUTE.fullmatch(path)
+        if match:
+            if self.provider_connections is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, connection_id, action = match.groups()
+            permission = Permission.VIEW_COMPANY_STATE if not action else Permission.MANAGE_PROVIDER_CONNECTIONS
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                permission, request_id, correlation_id)
+            if action == "disconnect":
+                self._method(method, "POST")
+                connection = self.provider_connections.disconnect(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    connection_id=connection_id,
+                )
+            elif action == "reconnect":
+                self._method(method, "POST")
+                values = self._object(body, required={"redirect_uri", "scopes"},
+                                      allowed={"redirect_uri", "scopes"})
+                current = self.provider_connections.get_connection(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    connection_id=connection_id,
+                )
+                scopes = values["scopes"]
+                if not isinstance(scopes, list) or not scopes:
+                    raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "scopes must be a non-empty list")
+                started = self.provider_connections.start(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    provider_name=current.provider,
+                    redirect_uri=self._short_string(values["redirect_uri"], 500),
+                    scopes=frozenset(scopes), reconnect_connection_id=connection_id,
+                )
+                return ApiResponse(HTTPStatus.OK, {"authorization": {
+                    "provider_connection_id": started.connection_id,
+                    "authorization_url": started.authorization_url,
+                    "pkce_verifier": started.pkce_verifier,
+                    "expires_at": self._time(started.expires_at),
+                }})
+            else:
+                self._method(method, "GET")
+                connection = self.provider_connections.get_connection(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    connection_id=connection_id,
+                )
+            return ApiResponse(HTTPStatus.OK, {"provider_connection": self._provider_connection(connection)})
 
         match = _COMPANY_CHILD_ROUTE.fullmatch(path)
         if match:
@@ -368,6 +472,13 @@ class CustomerApi:
             return ("GET", "POST") if child.group(2) == "handoff" else ("GET",)
         if _APPROVAL_ROUTE.fullmatch(path):
             return ("POST",)
+        if path == "/api/v1/provider-connections/oauth/callback":
+            return ("POST",)
+        if _PROVIDER_CONNECTIONS_ROUTE.fullmatch(path):
+            return ("GET", "POST")
+        provider = _PROVIDER_CONNECTION_ROUTE.fullmatch(path)
+        if provider:
+            return ("POST",) if provider.group(3) else ("GET",)
         if (
             path in {
                 "/api/v1/me",
@@ -394,6 +505,12 @@ class CustomerApi:
     def _identifier(value: object, field: str) -> str:
         if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
             raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", f"{field} is invalid")
+        return value
+
+    @staticmethod
+    def _short_string(value: object, maximum: int) -> str:
+        if not isinstance(value, str) or not value or len(value) > maximum or any(c in value for c in "\r\n\0"):
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "request field is invalid")
         return value
 
     def _accessible_memberships(self, token, user_id, support):
@@ -651,6 +768,24 @@ class CustomerApi:
             "status": item.status.value,
             "effective_until": CustomerApi._time(item.effective_until),
             "version": item.version,
+        }
+
+    @staticmethod
+    def _provider_connection(item):
+        return {
+            "provider_connection_id": item.connection_id,
+            "company_id": item.company_id,
+            "provider": item.provider,
+            "account_type": item.account_type,
+            "provider_account_id": item.provider_account_id,
+            "scopes_requested": sorted(item.scopes_requested),
+            "scopes_granted": sorted(item.scopes_granted),
+            "auth_method": item.auth_method,
+            "status": item.status.value,
+            "connected_at": CustomerApi._time(item.connected_at),
+            "expires_at": CustomerApi._time(item.expires_at),
+            "refreshed_at": CustomerApi._time(item.refreshed_at),
+            "revoked_at": CustomerApi._time(item.revoked_at),
         }
 
     @staticmethod
