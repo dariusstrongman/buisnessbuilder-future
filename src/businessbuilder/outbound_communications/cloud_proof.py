@@ -397,7 +397,7 @@ def run_staging_cloud_proof() -> dict[str, object]:
         audits = app.runtime_repository.list_audit(TENANT, COMPANY)
         actions = {item["action"] for item in audits}
         proof = {
-            "proof": "outbound-communications-safety-v1",
+            "proof": "communications-compliance-operations-v1",
             "status": "passed",
             "backend": "postgresql+sqs+secrets-manager+shared-fargate+sandbox-email",
             "inbound_reply_sandbox": executed[0][3].status is DeliveryStatus.DELIVERED,
