@@ -139,6 +139,9 @@ class RuntimeRepository(ABC):
     def list_broker_records(self, kind: str, tenant_id: str, company_id: str) -> tuple[Any, ...]: ...
 
     @abstractmethod
+    def get_broker_record_by_id(self, kind: str, record_id: str) -> Any: ...
+
+    @abstractmethod
     def claim_provider_receipt(self, receipt: Any) -> tuple[Any, bool]: ...
 
     @abstractmethod
@@ -149,6 +152,27 @@ class RuntimeRepository(ABC):
 
     @abstractmethod
     def list_provider_receipts(self, tenant_id: str, company_id: str) -> tuple[Any, ...]: ...
+
+    @abstractmethod
+    def save_oauth_transaction(self, transaction: Any) -> None: ...
+
+    @abstractmethod
+    def get_oauth_transaction(self, state_digest: str) -> Any: ...
+
+    @abstractmethod
+    def consume_oauth_transaction(self, state_digest: str, session_id: str,
+                                  redirect_digest: str, verifier_digest: str, *, at: datetime) -> Any: ...
+
+    @abstractmethod
+    def claim_provider_refresh(self, tenant_id: str, company_id: str, connection_id: str,
+                               owner: str, *, at: datetime, lease: timedelta) -> bool: ...
+
+    @abstractmethod
+    def release_provider_refresh(self, tenant_id: str, company_id: str,
+                                 connection_id: str, owner: str) -> None: ...
+
+    @abstractmethod
+    def claim_provider_callback(self, provider: str, event_id: str) -> bool: ...
 
 
 class SQLiteRuntimeRepository(RuntimeRepository):
@@ -308,6 +332,30 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                 );
                 CREATE INDEX IF NOT EXISTS provider_receipts_scope
                     ON provider_receipts(tenant_id, company_id, job_id);
+                CREATE TABLE IF NOT EXISTS oauth_transactions (
+                    state_digest TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    redirect_digest TEXT NOT NULL,
+                    verifier_digest TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    body TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_refresh_leases (
+                    connection_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    owner TEXT NOT NULL,
+                    lease_until TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_callback_events (
+                    provider TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY(provider, event_id)
+                );
                 """
             )
             self.connection.execute(
@@ -722,6 +770,12 @@ class SQLiteRuntimeRepository(RuntimeRepository):
         ).fetchall()
         return tuple(self._broker_record(kind, row["body"]) for row in rows)
 
+    def get_broker_record_by_id(self, kind: str, record_id: str):
+        row = self.connection.execute(
+            "SELECT body FROM broker_records WHERE kind=? AND record_id=?", (kind, record_id)
+        ).fetchone()
+        return self._broker_record(kind, row["body"]) if row else None
+
     @staticmethod
     def _provider_receipt(body: str):
         from businessbuilder.access_broker.serialization import decode_provider_receipt
@@ -773,3 +827,72 @@ class SQLiteRuntimeRepository(RuntimeRepository):
             (tenant_id, company_id),
         ).fetchall()
         return tuple(self._provider_receipt(row["body"]) for row in rows)
+
+    def save_oauth_transaction(self, transaction: Any) -> None:
+        with self._lock, self._write():
+            self.connection.execute(
+                """INSERT INTO oauth_transactions VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                ON CONFLICT(state_digest) DO NOTHING""",
+                (transaction.state_digest, transaction.session_id, transaction.tenant_id,
+                 transaction.company_id, transaction.redirect_uri_digest,
+                 transaction.pkce_verifier_digest, transaction.expires_at.isoformat(), encode(transaction)),
+            )
+
+    def get_oauth_transaction(self, state_digest):
+        from businessbuilder.provider_connection.serialization import decode_oauth_transaction
+        row = self.connection.execute(
+            "SELECT body FROM oauth_transactions WHERE state_digest=?", (state_digest,)
+        ).fetchone()
+        return decode_oauth_transaction(decode(row["body"])) if row else None
+
+    def consume_oauth_transaction(self, state_digest, session_id, redirect_digest, verifier_digest, *, at):
+        from businessbuilder.provider_connection.serialization import decode_oauth_transaction
+        from dataclasses import replace
+        with self._lock, self.transaction():
+            row = self.connection.execute(
+                """SELECT body FROM oauth_transactions WHERE state_digest=? AND session_id=?
+                AND redirect_digest=? AND verifier_digest=? AND consumed_at IS NULL AND expires_at>?""",
+                (state_digest, session_id, redirect_digest, verifier_digest, at.isoformat()),
+            ).fetchone()
+            if row is None:
+                return None
+            value = decode_oauth_transaction(decode(row["body"]))
+            consumed = replace(value, consumed_at=at)
+            self.connection.execute(
+                "UPDATE oauth_transactions SET consumed_at=?, body=? WHERE state_digest=? AND consumed_at IS NULL",
+                (at.isoformat(), encode(consumed), state_digest),
+            )
+            return consumed
+
+    def claim_provider_refresh(self, tenant_id, company_id, connection_id, owner, *, at, lease):
+        until = at + lease
+        with self._lock, self.transaction():
+            row = self.connection.execute(
+                "SELECT tenant_id, company_id, owner, lease_until FROM provider_refresh_leases WHERE connection_id=?",
+                (connection_id,),
+            ).fetchone()
+            if row and (row["tenant_id"], row["company_id"]) != (tenant_id, company_id):
+                raise PermissionError("provider refresh lease belongs to another scope")
+            if row and datetime.fromisoformat(row["lease_until"]) > at:
+                return False
+            self.connection.execute(
+                """INSERT INTO provider_refresh_leases VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET owner=excluded.owner, lease_until=excluded.lease_until""",
+                (connection_id, tenant_id, company_id, owner, until.isoformat()),
+            )
+            return True
+
+    def release_provider_refresh(self, tenant_id, company_id, connection_id, owner):
+        with self._lock, self._write():
+            self.connection.execute(
+                "DELETE FROM provider_refresh_leases WHERE connection_id=? AND tenant_id=? AND company_id=? AND owner=?",
+                (connection_id, tenant_id, company_id, owner),
+            )
+
+    def claim_provider_callback(self, provider, event_id):
+        with self._lock, self._write():
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO provider_callback_events(provider, event_id) VALUES (?, ?)",
+                (provider, event_id),
+            )
+            return cursor.rowcount == 1

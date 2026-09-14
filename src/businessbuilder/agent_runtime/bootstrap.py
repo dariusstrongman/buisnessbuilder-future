@@ -63,6 +63,7 @@ class PostgresAgentRuntime:
     commercial: CommercialService
     workforce: WorkforcePolicyService
     runtime: JobOrchestrator
+    principal_authority: PrincipalContextAuthority
     service: AgentRuntimeService
     broker: SecretArtifactBroker | None
     dispatcher: AgentOutboxDispatcher
@@ -184,6 +185,7 @@ def create_postgres_agent_runtime(
         commercial,
         workforce,
         runtime,
+        authority,
         service,
         broker,
         AgentOutboxDispatcher(

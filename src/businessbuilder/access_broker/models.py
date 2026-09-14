@@ -29,7 +29,9 @@ def iso(value: datetime) -> str:
 
 
 class ConnectionStatus(StrEnum):
+    PENDING_AUTHORIZATION = "pending_authorization"
     ACTIVE = "active"
+    RECONNECT_REQUIRED = "reconnect_required"
     DISCONNECTED = "disconnected"
     REVOKED = "revoked"
     EXPIRED = "expired"
@@ -105,6 +107,18 @@ class ProviderConnection:
     updated_at: datetime
     expires_at: datetime | None = None
     revoked_reason: str | None = None
+    account_type: str = "external_service"
+    provider_account_id: str | None = None
+    scopes_requested: frozenset[str] = frozenset()
+    scopes_granted: frozenset[str] = frozenset()
+    auth_method: str = "oauth2"
+    connected_by: str | None = None
+    connected_at: datetime | None = None
+    refreshed_at: datetime | None = None
+    revoked_at: datetime | None = None
+    compromised_at: datetime | None = None
+    provider_metadata: tuple[tuple[str, str], ...] = ()
+    secret_ref_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("connection_id", "account_id", "tenant_id", "company_id", "provider"):
@@ -113,6 +127,26 @@ class ProviderConnection:
         _require_time(self.updated_at, "updated_at")
         if self.expires_at:
             _require_time(self.expires_at, "expires_at")
+        for value in (self.connected_at, self.refreshed_at, self.revoked_at, self.compromised_at):
+            if value:
+                _require_time(value, "connection timestamp")
+        if self.provider_account_id:
+            _require_id(self.provider_account_id, "provider_account_id")
+        if self.connected_by:
+            _require_id(self.connected_by, "connected_by")
+        for scope in (*self.scopes_requested, *self.scopes_granted):
+            _require_id(scope, "oauth scope")
+        if not self.account_type or not self.auth_method:
+            raise ValueError("provider connection account_type and auth_method are required")
+        if len(self.provider_metadata) > 32 or any(
+            not key or len(key) > 80 or len(value) > 300
+            for key, value in self.provider_metadata
+        ):
+            raise ValueError("provider metadata is not safe for persistence")
+
+    @property
+    def provider_connection_id(self) -> str:
+        return self.connection_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +290,7 @@ class ProviderReceipt:
     retryable: bool
     attempts: int = 1
     completed_at: datetime | None = None
+    connection_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (

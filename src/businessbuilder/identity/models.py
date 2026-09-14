@@ -48,6 +48,7 @@ class Permission(StrEnum):
     PERFORM_HANDOFF = "handoff.perform"
     ACCESS_ARTIFACTS = "artifacts.access"
     INTERACT_AI_WORKFORCE = "ai_workforce.interact"
+    MANAGE_PROVIDER_CONNECTIONS = "provider_connections.manage"
     REQUEST_SUPPORT = "support.request"
 
 

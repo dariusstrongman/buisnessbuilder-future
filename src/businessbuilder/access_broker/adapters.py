@@ -18,6 +18,16 @@ class InMemorySecretStore(SecretStorePort):
     def register(self, locator: str, value: bytes) -> None:
         self._values[locator] = bytes(value)
 
+    def store(self, locator: str, value: bytes) -> None:
+        self.register(locator, value)
+
+    def revoke(self, locator: str) -> None:
+        value = self._values.pop(locator, None)
+        if value is not None:
+            scratch = bytearray(value)
+            for index in range(len(scratch)):
+                scratch[index] = 0
+
     def resolve(self, locator: str) -> EphemeralSecret:
         try:
             return EphemeralSecret(self._values[locator])
@@ -46,6 +56,18 @@ class AwsSecretsManagerStore(SecretStorePort):
         else:
             value = str(response["SecretString"]).encode("utf-8")
         return EphemeralSecret(value)
+
+    def store(self, locator: str, value: bytes) -> None:
+        if locator not in self.allowed_secret_arns:
+            raise PermissionError("secret locator is outside the worker allowlist")
+        self.client.put_secret_value(SecretId=locator, SecretBinary=bytes(value))
+
+    def revoke(self, locator: str) -> None:
+        if locator not in self.allowed_secret_arns:
+            raise PermissionError("secret locator is outside the worker allowlist")
+        # Replace provider material with a non-sensitive tombstone while durable
+        # connection state supplies the immediate authorization denial.
+        self.client.put_secret_value(SecretId=locator, SecretString='{"status":"revoked"}')
 
 
 class InMemoryArtifactStore(ArtifactStorePort):

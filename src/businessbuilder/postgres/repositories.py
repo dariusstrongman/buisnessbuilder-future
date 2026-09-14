@@ -1222,6 +1222,15 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
             )
             return tuple(self._broker_record(kind, row["body"]) for row in cursor)
 
+    def get_broker_record_by_id(self, kind: str, record_id: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_broker_records WHERE kind=%s AND record_id=%s",
+                (kind, record_id),
+            )
+            row = cursor.fetchone()
+        return self._broker_record(kind, row["body"]) if row else None
+
     @staticmethod
     def _provider_receipt(body: str):
         from businessbuilder.access_broker.serialization import decode_provider_receipt
@@ -1296,6 +1305,77 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
                 (tenant_id, company_id),
             )
             return tuple(self._provider_receipt(row["body"]) for row in cursor)
+
+    def save_oauth_transaction(self, transaction: Any) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_oauth_transactions(
+                state_digest, session_id, tenant_id, company_id, redirect_digest,
+                verifier_digest, expires_at, body) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(state_digest) DO NOTHING""",
+                (transaction.state_digest, transaction.session_id, transaction.tenant_id,
+                 transaction.company_id, transaction.redirect_uri_digest,
+                 transaction.pkce_verifier_digest, transaction.expires_at, encode(transaction)),
+            )
+
+    def get_oauth_transaction(self, state_digest):
+        from businessbuilder.provider_connection.serialization import decode_oauth_transaction
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT body FROM bb_oauth_transactions WHERE state_digest=%s", (state_digest,))
+            row = cursor.fetchone()
+        return decode_oauth_transaction(decode(row["body"])) if row else None
+
+    def consume_oauth_transaction(self, state_digest, session_id, redirect_digest, verifier_digest, *, at):
+        from businessbuilder.provider_connection.serialization import decode_oauth_transaction
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT body FROM bb_oauth_transactions WHERE state_digest=%s
+                    AND session_id=%s AND redirect_digest=%s AND verifier_digest=%s
+                    AND consumed_at IS NULL AND expires_at>%s FOR UPDATE""",
+                    (state_digest, session_id, redirect_digest, verifier_digest, at),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                value = decode_oauth_transaction(decode(row["body"]))
+                consumed = replace(value, consumed_at=at)
+                cursor.execute(
+                    "UPDATE bb_oauth_transactions SET consumed_at=%s, body=%s WHERE state_digest=%s AND consumed_at IS NULL",
+                    (at, encode(consumed), state_digest),
+                )
+                return consumed
+
+    def claim_provider_refresh(self, tenant_id, company_id, connection_id, owner, *, at, lease):
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO bb_provider_refresh_leases(connection_id, tenant_id, company_id, owner, lease_until)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT(connection_id) DO UPDATE SET owner=EXCLUDED.owner, lease_until=EXCLUDED.lease_until
+                    WHERE bb_provider_refresh_leases.tenant_id=EXCLUDED.tenant_id
+                    AND bb_provider_refresh_leases.company_id=EXCLUDED.company_id
+                    AND bb_provider_refresh_leases.lease_until<=%s RETURNING owner""",
+                    (connection_id, tenant_id, company_id, owner, at + lease, at),
+                )
+                return cursor.fetchone() is not None
+
+    def release_provider_refresh(self, tenant_id, company_id, connection_id, owner):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """DELETE FROM bb_provider_refresh_leases WHERE connection_id=%s
+                AND tenant_id=%s AND company_id=%s AND owner=%s""",
+                (connection_id, tenant_id, company_id, owner),
+            )
+
+    def claim_provider_callback(self, provider, event_id):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_provider_callback_events(provider, event_id) VALUES (%s,%s)
+                ON CONFLICT(provider, event_id) DO NOTHING RETURNING event_id""",
+                (provider, event_id),
+            )
+            return cursor.fetchone() is not None
 
 
 class PostgresVerificationRepository(VerificationRepository, _PostgresRepository):

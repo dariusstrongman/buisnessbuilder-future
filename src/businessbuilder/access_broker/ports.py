@@ -59,6 +59,12 @@ class SecretStorePort(ABC):
     @abstractmethod
     def resolve(self, locator: str) -> EphemeralSecret: ...
 
+    @abstractmethod
+    def store(self, locator: str, value: bytes) -> None: ...
+
+    @abstractmethod
+    def revoke(self, locator: str) -> None: ...
+
 
 class ArtifactStorePort(ABC):
     @abstractmethod

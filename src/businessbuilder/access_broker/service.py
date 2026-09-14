@@ -87,6 +87,7 @@ class SecretArtifactBroker:
         id_factory: Callable[[str], str],
         maximum_artifact_bytes: int = 25 * 1024 * 1024,
         maximum_signed_seconds: int = 300,
+        connection_tokens=None,
     ) -> None:
         if maximum_artifact_bytes < 1 or maximum_signed_seconds not in range(1, 901):
             raise ValueError("broker limits are invalid")
@@ -99,6 +100,7 @@ class SecretArtifactBroker:
         self.id_factory = id_factory
         self.maximum_artifact_bytes = maximum_artifact_bytes
         self.maximum_signed_seconds = maximum_signed_seconds
+        self.connection_tokens = connection_tokens
 
     def register_external_account(self, account: ExternalAccount, *, actor_id: str) -> None:
         self.repository.save_broker_record(
@@ -285,6 +287,10 @@ class SecretArtifactBroker:
         crash_after_provider: bool = False,
     ) -> ProviderReceipt:
         self._authorize_envelope(envelope)
+        if self.connection_tokens is not None:
+            self.connection_tokens.refresh_for_job(
+                envelope, secret_ref, operation=operation
+            )
         credential, connection = self._authorize_secret_record(envelope, secret_ref, operation)
         for artifact_ref in artifact_refs:
             self._authorize_artifact_record(envelope, artifact_ref, operation)
@@ -300,6 +306,7 @@ class SecretArtifactBroker:
             envelope.job_id, envelope.capability, connection.provider, operation,
             stable_id("provider_request", action_key), action_key,
             ReceiptStatus.IN_PROGRESS, self.clock(), "pending", None, False,
+            connection_id=connection.connection_id,
         )
         claimed, execute = self.repository.claim_provider_receipt(receipt)
         if not execute:
