@@ -1,0 +1,72 @@
+{
+  "proof": "secret-artifact-broker-v1",
+  "status": "passed",
+  "source_commit": "54f025678105424c46b64ad54259b202cbab1c10",
+  "region": "us-east-1",
+  "image": {
+    "repository": "businessbuilder-staging-app",
+    "tag": "broker-54f025678105",
+    "digest": "sha256:226796da86c2a5f6ee13c19fc276e26f27dc0e9d0356e30712e706f2f2c46b95",
+    "size_bytes": 71421847
+  },
+  "execution": {
+    "cluster": "businessbuilder-staging",
+    "task_definition": "businessbuilder-staging-broker-worker:3",
+    "task_id": "a3d3a1053c6d4970aa963375bd86c3f8",
+    "launch_type": "FARGATE",
+    "exit_code": 0,
+    "bounded_one_off_task": true,
+    "shared_worker_model": true,
+    "existing_web_service_changed": false
+  },
+  "least_privilege": {
+    "task_role": "businessbuilder-staging-broker-task-role",
+    "exact_fake_secret_resource": true,
+    "exact_fictional_company_s3_prefix": true,
+    "exact_shared_queue": true,
+    "bucket_listing_allowed": false,
+    "wildcard_secret_access": false,
+    "access_key_created": false
+  },
+  "result": {
+    "backend": "postgresql+sqs+s3+secrets-manager+shared-fargate-task",
+    "runtime_authority": true,
+    "worker_result_persisted": true,
+    "credential_resolved_in_memory": true,
+    "credential_discarded": true,
+    "job_payload_opaque_only": true,
+    "artifact_hash_verified": true,
+    "signed_access_bounded": true,
+    "provider_receipt_persisted": true,
+    "duplicate_provider_action_suppressed": true,
+    "wrong_tenant_denied": true,
+    "wrong_capability_denied": true,
+    "expired_job_denied": true,
+    "revoked_provider_denied": true,
+    "suspended_entitlement_denied": true,
+    "artifact_tampering_denied": true,
+    "tenant_isolation": true,
+    "audit_complete": true,
+    "no_secret_locator_in_job_receipt_or_audit": true,
+    "no_real_external_action": true,
+    "test_provider_only": true
+  },
+  "aws_state_after_proof": {
+    "job_queue_visible_messages": 0,
+    "job_queue_in_flight_messages": 0,
+    "private_bucket_public_access_blocked": true,
+    "bucket_default_encryption": "AES256",
+    "proof_artifact_size_bytes": 64,
+    "private_rds_preserved": true
+  },
+  "safety": {
+    "production_touched": false,
+    "production_deployed": false,
+    "stromation_touched": false,
+    "website_builder_touched": false,
+    "live_stripe_used": false,
+    "real_customer_data_used": false,
+    "real_external_communication_sent": false,
+    "iam_deployer_or_access_key_created": false
+  }
+}

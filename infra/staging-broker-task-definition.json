@@ -1,0 +1,49 @@
+{
+  "family": "businessbuilder-staging-broker-worker",
+  "taskRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-broker-task-role",
+  "executionRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "broker-worker",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:226796da86c2a5f6ee13c19fc276e26f27dc0e9d0356e30712e706f2f2c46b95",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {"initProcessEnabled": true},
+      "command": ["python", "-m", "businessbuilder.access_broker.cloud_proof"],
+      "environment": [
+        {"name": "APP_VERSION", "value": "54f025678105424c46b64ad54259b202cbab1c10"},
+        {"name": "ENVIRONMENT", "value": "staging"},
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "DB_HOST", "value": "businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com"},
+        {"name": "DB_PORT", "value": "5432"},
+        {"name": "DB_NAME", "value": "businessbuilder"},
+        {"name": "DB_SCHEMA", "value": "bb_secret_broker_54f025678105"},
+        {"name": "DB_SSLMODE", "value": "require"},
+        {"name": "JOB_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/199949321335/businessbuilder-staging-jobs"},
+        {"name": "ARTIFACT_BUCKET", "value": "businessbuilder-staging-artifacts-199949321335-us-east-1"},
+        {"name": "BROKER_TEST_SECRET_ARN", "value": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-staging-broker-test-email-v1-osH5Ip"},
+        {"name": "BROKER_PROOF_ID", "value": "secret_artifact_broker_54f025678105"}
+      ],
+      "secrets": [
+        {"name": "DB_USER", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:username::"},
+        {"name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:password::"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/businessbuilder-staging",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "broker-worker"
+        }
+      }
+    }
+  ]
+}
