@@ -76,7 +76,6 @@ def create_postgres_customer_api(
         RuntimeCommercialEventSink(runtime.events),
         id_factory=random_id,
         clock=utc_now,
-        provider_connections=provider_connections,
     )
     seed_default_catalog(commercial_repository, effective_at=utc_now())
     return CustomerApi(
@@ -92,4 +91,5 @@ def create_postgres_customer_api(
         commercial_repository=commercial_repository,
         id_factory=random_id,
         clock=utc_now,
+        provider_connections=provider_connections,
     )
