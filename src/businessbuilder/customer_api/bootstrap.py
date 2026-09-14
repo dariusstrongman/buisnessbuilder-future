@@ -28,6 +28,10 @@ from businessbuilder.verification import (
     default_registry,
 )
 from businessbuilder.identity import AuthorizationPolicy, PrincipalContextAuthority
+from businessbuilder.residential_cleaning import (
+    ResidentialCleaningJourneyService,
+    ResidentialCleaningVerificationRouter,
+)
 
 from .application import CustomerApi
 
@@ -45,6 +49,7 @@ def create_postgres_customer_api(
     outbound_communications=None,
     communications_compliance=None,
     live_canary_readiness=None,
+    enable_residential_cleaning_test_checkout: bool = False,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -69,7 +74,7 @@ def create_postgres_customer_api(
         repository=runtime_repository,
         registry=CapabilityRegistry(),
         company_reader=CompanyBrainRuntimeAdapter(company_brain),
-        verification=verification_port,
+        verification=ResidentialCleaningVerificationRouter(verification_port),
         id_factory=random_id,
         clock=clock,
         approval_principals=IdentityApprovalPrincipalVerifier(authority),
@@ -82,6 +87,18 @@ def create_postgres_customer_api(
         clock=clock,
     )
     seed_default_catalog(commercial_repository, effective_at=clock())
+    residential_cleaning = ResidentialCleaningJourneyService(
+        identity_repository=identity_repository,
+        principal_authority=authority,
+        company_brain=company_brain,
+        runtime=runtime,
+        runtime_repository=runtime_repository,
+        commercial=commercial,
+        commercial_repository=commercial_repository,
+        id_factory=random_id,
+        clock=clock,
+        enable_test_checkout=enable_residential_cleaning_test_checkout,
+    )
     return CustomerApi(
         identity_repository=identity_repository,
         principal_authority=authority,
@@ -99,4 +116,5 @@ def create_postgres_customer_api(
         outbound_communications=outbound_communications,
         communications_compliance=communications_compliance,
         live_canary_readiness=live_canary_readiness,
+        residential_cleaning=residential_cleaning,
     )

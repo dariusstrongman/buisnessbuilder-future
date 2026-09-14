@@ -82,6 +82,10 @@ _ERASURE_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/recipients/([A-Za-z0-9_.:-]{3,160})/erasure$"
 )
 _PUBLIC_UNSUBSCRIBE_ROUTE = "/api/v1/communications/unsubscribe"
+_CLEANING_PILOT_START_ROUTE = "/api/v1/pilots/residential-cleaning/intakes"
+_CLEANING_PILOT_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot(?:/(approve))?$"
+)
 _FORGED_AUTHORITY_HEADERS = frozenset(
     {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
 )
@@ -132,6 +136,7 @@ class CustomerApi:
         outbound_communications=None,
         communications_compliance=None,
         live_canary_readiness=None,
+        residential_cleaning=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -149,6 +154,7 @@ class CustomerApi:
         self.outbound_communications = outbound_communications
         self.communications_compliance = communications_compliance
         self.live_canary_readiness = live_canary_readiness
+        self.residential_cleaning = residential_cleaning
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -250,6 +256,60 @@ class CustomerApi:
             )
 
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        if path == _CLEANING_PILOT_START_ROUTE:
+            self._method(method, "POST")
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            if support:
+                raise ApiFailure(
+                    HTTPStatus.FORBIDDEN,
+                    "forbidden",
+                    "support cannot start a founder journey",
+                )
+            values = self._object(
+                body,
+                required={"idempotency_key", "intake"},
+                allowed={"idempotency_key", "intake"},
+            )
+            try:
+                journey = self.residential_cleaning.start(
+                    raw_session_token=token,
+                    user=user,
+                    intake=values["intake"],
+                    idempotency_key=self._short_string(values["idempotency_key"], 160),
+                    correlation_id=correlation_id,
+                )
+            except PermissionError:
+                self._audit_denial(
+                    user.user_id,
+                    "unresolved",
+                    None,
+                    Permission.APPROVE_FOUNDER_DECISIONS.value,
+                    "founder journey admission denied",
+                    request_id,
+                    correlation_id,
+                )
+                raise ApiFailure(
+                    HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted"
+                ) from None
+            except RuntimeError:
+                raise ApiFailure(
+                    HTTPStatus.CONFLICT,
+                    "journey_conflict",
+                    "journey state conflicts with this request",
+                ) from None
+            scoped = self._company_principal(
+                token,
+                user.user_id,
+                journey["company"]["company_id"],
+                None,
+                Permission.VIEW_COMPANY_STATE,
+                request_id,
+                correlation_id,
+            )
+            journey["verification"] = self._readiness(scoped)
+            return ApiResponse(HTTPStatus.CREATED, {"journey": journey})
+
         if path == "/api/v1/provider-connections/oauth/callback":
             self._method(method, "POST")
             if self.provider_connections is None:
@@ -302,6 +362,60 @@ class CustomerApi:
                 request_id, correlation_id,
             )
             return ApiResponse(HTTPStatus.OK, {"company": self._company(principal)})
+
+        match = _CLEANING_PILOT_ROUTE.fullmatch(path)
+        if match:
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, action = match.groups()
+            permission = (
+                Permission.APPROVE_FOUNDER_DECISIONS
+                if action == "approve"
+                else Permission.VIEW_COMPANY_STATE
+            )
+            principal = self._company_principal(
+                token,
+                user.user_id,
+                company_id,
+                support,
+                permission,
+                request_id,
+                correlation_id,
+            )
+            try:
+                if action == "approve":
+                    self._method(method, "POST")
+                    values = self._object(
+                        body, required={"approval_id"}, allowed={"approval_id"}
+                    )
+                    journey = self.residential_cleaning.approve(
+                        principal,
+                        approval_id=self._identifier(values["approval_id"], "approval_id"),
+                    )
+                else:
+                    self._method(method, "GET")
+                    journey = self.residential_cleaning.project(principal)
+            except PermissionError:
+                self._audit_denial(
+                    principal.user_id,
+                    principal.tenant_id,
+                    company_id,
+                    permission.value,
+                    "founder journey operation denied",
+                    request_id,
+                    correlation_id,
+                )
+                raise ApiFailure(
+                    HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted"
+                ) from None
+            except RuntimeError:
+                raise ApiFailure(
+                    HTTPStatus.CONFLICT,
+                    "journey_conflict",
+                    "journey state conflicts with this request",
+                ) from None
+            journey["verification"] = self._readiness(principal)
+            return ApiResponse(HTTPStatus.OK, {"journey": journey})
 
         match = _PROVIDER_CONNECTIONS_ROUTE.fullmatch(path)
         if match:
@@ -692,6 +806,11 @@ class CustomerApi:
     @staticmethod
     def allowed_methods(path: str) -> tuple[str, ...]:
         """Return only methods supported by a recognized customer route."""
+        if path == _CLEANING_PILOT_START_ROUTE:
+            return ("POST",)
+        cleaning_pilot = _CLEANING_PILOT_ROUTE.fullmatch(path)
+        if cleaning_pilot:
+            return ("POST",) if cleaning_pilot.group(2) == "approve" else ("GET",)
         if path == "/api/v1/companies" or path == "/api/v1/orders":
             return ("GET", "POST")
         child = _COMPANY_CHILD_ROUTE.fullmatch(path)
@@ -1133,7 +1252,12 @@ class CustomerApi:
         records = self.company_brain.query_current_state(
             Scope(principal.tenant_id, principal.company_id or ""), kinds=(RecordKind.FOUNDER_ACTION,)
         )
-        allowed = {"title", "reason", "instructions", "risk", "irreversible", "state", "required_evidence_kinds", "due_at", "critical", "selected"}
+        allowed = {
+            "title", "reason", "instructions", "risk", "irreversible", "state",
+            "required_evidence_kinds", "evidence_refs", "due_at", "critical",
+            "selected", "responsibility", "partner_authority", "authority_target",
+            "blocks", "approval_id",
+        }
         return [
             {"founder_action_id": item.record_id, **{key: value for key, value in item.data.items() if key in allowed}, "version": item.version}
             for item in records

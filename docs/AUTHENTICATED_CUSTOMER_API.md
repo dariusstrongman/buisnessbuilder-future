@@ -48,6 +48,9 @@ payloads.
 | GET | `/api/v1/entitlements?company_id=...` | `view_company_state` | Commercial |
 | GET | `/api/v1/companies/{company_id}/handoff` | `view_company_state` | Verification |
 | POST | `/api/v1/companies/{company_id}/handoff` | `perform_handoff`; OWNER only | fail-closed until an authoritative handoff workflow exists |
+| POST | `/api/v1/pilots/residential-cleaning/intakes` | active authenticated founder; creates or reuses one OWNER organization | Identity + Company Brain + Runtime |
+| GET | `/api/v1/companies/{company_id}/residential-cleaning-pilot` | `view_company_state` | safe composition of Company Brain, Runtime, Commercial, and Verification |
+| POST | `/api/v1/companies/{company_id}/residential-cleaning-pilot/approve` | current OWNER/founder through signed principal | Runtime approval, then Company Brain and Commercial |
 
 SUPPORT can only read within an active grant and impersonation-session scope.
 SUPPORT cannot approve, spend, change billing, perform handoff, or satisfy
