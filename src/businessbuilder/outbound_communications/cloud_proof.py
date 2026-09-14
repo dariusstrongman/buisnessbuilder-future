@@ -9,6 +9,7 @@ import secrets
 from urllib.parse import parse_qs, urlparse
 
 from businessbuilder.access_broker import AwsSecretsManagerStore, JobSecretRef, S3ArtifactStore
+from businessbuilder.access_broker.models import stable_id
 from businessbuilder.agent_runtime import SqsQueue, TriggerClass
 from businessbuilder.agent_runtime.bootstrap import create_postgres_agent_runtime
 from businessbuilder.ai_workforce import safe_role_definitions
@@ -23,6 +24,12 @@ from businessbuilder.communications_compliance.models import (
 )
 from businessbuilder.identity import (
     AuthorizationContext, FakeDevAuthenticationProvider, IdentityService, SessionService,
+)
+from businessbuilder.live_canary import (
+    DeterministicEmailProviderEmulator, LiveCanaryReadiness, ReconciliationResult,
+)
+from businessbuilder.live_canary.models import (
+    CanarySendReservation, ReadinessState, ReconciliationState, ReputationState,
 )
 from businessbuilder.provider_connection import SandboxEmailProvider, attach_provider_connections
 from businessbuilder.runtime import Budget, Event, Money
@@ -88,6 +95,17 @@ def run_staging_cloud_proof() -> dict[str, object]:
                                          emergency=4, window_seconds=3600),
         operator_verifier=lambda value: "staging_operator" if value is operator_context else "",
         sandbox_providers=frozenset({provider.provider}),
+    )
+    canary_emulator = DeterministicEmailProviderEmulator(provider=provider.provider)
+    canary = LiveCanaryReadiness(
+        repository=app.runtime_repository, identity_repository=app.identity_repository,
+        commercial_repository=app.commercial_repository, compliance=compliance,
+        company_brain=app.company_brain, clock=clock, id_factory=app.runtime.id_factory,
+        permit_signing_key=secrets.token_bytes(48),
+        provider_adapters={provider.provider: canary_emulator},
+        operator_verifier=lambda value: "staging_operator" if value is operator_context else "",
+        founder_approval_verifier=lambda tenant, company, ref: (
+            tenant == TENANT and company == COMPANY and ref == "approval_staging_canary_001"),
     )
     try:
         ids = DeterministicIds()
@@ -188,6 +206,33 @@ def run_staging_cloud_proof() -> dict[str, object]:
                 company_jurisdiction="US", recipient_jurisdiction="US",
                 source_ref="staging_company_profile")
 
+        sender = canary.record_sender_readiness(
+            operator_context, tenant_id=TENANT, company_id=COMPANY,
+            provider_connection_id=connection.connection_id,
+            sender_address="canary-sender@example.test",
+            domain_ownership_verified=True, spf_valid=True, dkim_valid=True,
+            dmarc_present=True, alignment_valid=True, provider_verified=True,
+            reputation=ReputationState.GOOD)
+        canary.record_deliverability(
+            operator_context, tenant_id=TENANT, company_id=COMPANY,
+            provider_connection_id=connection.connection_id)
+        canary_eligibility = canary.evaluate_eligibility(
+            tenant_id=TENANT, company_id=COMPANY,
+            provider_connection_id=connection.connection_id,
+            sender_id=sender.sender_id, approval_ref="approval_staging_canary_001")
+        permit = canary.conduct_simulated_ceremony(
+            operator_context, tenant_id=TENANT, company_id=COMPANY,
+            provider_connection_id=connection.connection_id, sender_id=sender.sender_id,
+            recipient_digests=(recipients[0].destination_digest,),
+            recipient_domains=("example.test",),
+            allowed_purposes=(CommunicationPurpose.REPLY_TO_INBOUND,),
+            max_sends_total=2, max_sends_hour=2,
+            starts_at=clock(), expires_at=clock() + timedelta(hours=1),
+            monitoring_owner="staging_operator",
+            rollback_plan_ref="runbook_rollback_v1",
+            kill_switch_test_ref="staging_kill_switch_test_001",
+            approval_ref="approval_staging_canary_001")
+
         flows = (
             ("inbound", recipients[0], CommunicationPurpose.REPLY_TO_INBOUND,
              "role_inbox_assistant", "send_preapproved_reply", events[0],
@@ -208,7 +253,8 @@ def run_staging_cloud_proof() -> dict[str, object]:
                 purpose=purpose, agent_role=role, capability="communications.email",
                 provider_connection_id=connection.connection_id,
                 runtime_idempotency_key=f"communications-{name}-0001",
-                content=content, evidence=evidence, context_ref=event.event_id)
+                content=content, evidence=evidence, context_ref=event.event_id,
+                canary_permit_ref=permit.permit_id if name == "inbound" else None)
             job = app.service.submit(
                 tenant_id=TENANT, company_id=COMPANY, role_id=role,
                 capability="communications.email", action=action,
@@ -244,6 +290,56 @@ def run_staging_cloud_proof() -> dict[str, object]:
         duplicate_result = app.worker.process_one(wait_seconds=20)
         duplicate_send_suppressed = (
             duplicate_result == "duplicate" and provider.action_count == calls_after_three)
+
+        canary_request = app.runtime_repository.get_broker_record(
+            "communication_request", TENANT, COMPANY, executed[0][1].communication_ref)
+        unexpected_recipient_denied = _denied(lambda: canary.validate_simulated_send(
+            replace(canary_request, recipient_id=recipients[1].recipient_id),
+            recipients[1], stage="admission"))
+        original_canary_key = stable_id(
+            "canary_send", permit.permit_id, canary_request.runtime_idempotency_key)
+        original_reservation = CanarySendReservation(
+            stable_id("canary_reservation", permit.permit_id,
+                      canary_request.communication_id), permit.permit_id,
+            TENANT, COMPANY, canary_request.communication_id,
+            original_canary_key, clock())
+        _, duplicate_allowed, duplicate_reason = app.runtime_repository.reserve_canary_send(
+            original_reservation, permit.max_sends_total, permit.max_sends_hour)
+        extra_reservation = CanarySendReservation(
+            "canary_reservation_staging_extra", permit.permit_id, TENANT, COMPANY,
+            "communication_staging_extra", "canary_staging_extra_key", clock())
+        _, extra_allowed, _ = app.runtime_repository.reserve_canary_send(
+            extra_reservation, permit.max_sends_total, permit.max_sends_hour)
+        overflow = replace(extra_reservation,
+                           reservation_id="canary_reservation_staging_overflow",
+                           communication_id="communication_staging_overflow",
+                           idempotency_key="canary_staging_overflow_key")
+        _, overflow_allowed, overflow_reason = app.runtime_repository.reserve_canary_send(
+            overflow, permit.max_sends_total, permit.max_sends_hour)
+        expired_permit = canary.conduct_simulated_ceremony(
+            operator_context, tenant_id=TENANT, company_id=COMPANY,
+            provider_connection_id=connection.connection_id, sender_id=sender.sender_id,
+            recipient_digests=(recipients[0].destination_digest,),
+            recipient_domains=("example.test",),
+            allowed_purposes=(CommunicationPurpose.REPLY_TO_INBOUND,),
+            max_sends_total=1, max_sends_hour=1,
+            starts_at=clock(), expires_at=clock() + timedelta(seconds=1),
+            monitoring_owner="staging_operator", rollback_plan_ref="runbook_rollback_v1",
+            kill_switch_test_ref="staging_kill_switch_test_001",
+            approval_ref="approval_staging_canary_001")
+        proof_time = clock.now
+        clock.now += timedelta(seconds=2)
+        expired_permit_denied = _denied(lambda: canary.validate_simulated_send(
+            replace(canary_request, canary_permit_ref=expired_permit.permit_id),
+            recipients[0], stage="admission"))
+        clock.now = proof_time
+        canary_emulator.set_result(
+            executed[0][2].provider_request_id,
+            ReconciliationResult(ReconciliationState.RESOLVED,
+                                 "reconciled_sandbox_accepted", "sandbox_message_ref"))
+        reconciliation = canary.reconcile_uncertain(
+            tenant_id=TENANT, company_id=COMPANY,
+            receipt_id=executed[0][2].receipt_id, adapter_name=provider.provider)
 
         unsubscribe_token = compliance.issue_unsubscribe_token(
             tenant_id=TENANT, company_id=COMPANY,
@@ -446,6 +542,19 @@ def run_staging_cloud_proof() -> dict[str, object]:
             "rollout_sandbox_only": live_tier_denied and not compliance.live_send_enabled,
             "operational_alerts_persisted": bool(app.runtime_repository.list_broker_records(
                 "communication_compliance_alert", TENANT, COMPANY)),
+            "canary_ready": canary_eligibility.state is ReadinessState.CANARY_READY,
+            "canary_simulation_only": permit.simulation_only,
+            "canary_unexpected_recipient_denied": unexpected_recipient_denied,
+            "canary_duplicate_reservation_suppressed": (
+                not duplicate_allowed and duplicate_reason == "duplicate"),
+            "canary_send_cap_enforced": (
+                extra_allowed and not overflow_allowed and "cap exceeded" in overflow_reason),
+            "canary_expiry_enforced": expired_permit_denied,
+            "canary_uncertain_send_reconciled": (
+                reconciliation.state is ReconciliationState.RESOLVED),
+            "canary_live_gate_false": (
+                not canary.live_send_enabled and not compliance.live_send_enabled
+                and not canary_emulator.contract.network_delivery_enabled),
         }
         failed = [key for key, value in proof.items() if isinstance(value, bool) and not value]
         if failed:

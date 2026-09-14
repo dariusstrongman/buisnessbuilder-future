@@ -95,6 +95,7 @@ class CommunicationsCompliance:
         self.sandbox_providers = sandbox_providers
         self.notification_adapter = notification_adapter
         self.live_send_enabled = False  # hard server-side build invariant for this branch
+        self.canary_readiness = None
         outbound_safety.compliance = self
 
     def configure_jurisdiction(
@@ -326,7 +327,10 @@ class CommunicationsCompliance:
                                           CommunicationPurpose.RE_ENGAGEMENT}:
                 if evidence.purpose is not communication.purpose:
                     raise ComplianceDenied("purpose-specific marketing consent is required")
-        except ComplianceDenied as exc:
+            if self.canary_readiness is not None:
+                self.canary_readiness.validate_simulated_send(
+                    communication, recipient, stage=stage)
+        except (ComplianceDenied, PermissionError) as exc:
             outcome = PolicyOutcome.DENIED
             reason = self._reason(exc)
         decision = ComplianceDecision(

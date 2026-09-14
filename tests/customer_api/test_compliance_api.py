@@ -79,6 +79,12 @@ class ComplianceCustomerApiTests(unittest.TestCase):
         self.fixture.setUp()
         self.stub = ComplianceApiStub(self.fixture)
         self.fixture.api.communications_compliance = self.stub
+        self.fixture.api.live_canary_readiness = type("CanaryStatusStub", (), {
+            "customer_status": lambda stub, principal, **scope: {
+                "provider": "connected", "mode": "Sandbox testing",
+                "status": "Canary review pending", "live_send_enabled": False,
+            }
+        })()
 
     def tearDown(self):
         self.fixture.tearDown()
@@ -149,6 +155,17 @@ class ComplianceCustomerApiTests(unittest.TestCase):
             "GET", "/api/v1/companies/company_other/communications/compliance-status",
             token=self.fixture.owner_token)
         self.assertEqual(404, other.status)
+
+    def test_canary_readiness_is_read_only_customer_safe_status(self):
+        path = (f"/api/v1/companies/{self.fixture.company_id}"
+                "/communications/canary-readiness")
+        response = self.request("GET", path, token=self.fixture.owner_token)
+        self.assertEqual(200, response.status)
+        self.assertEqual("Sandbox testing", response.body["communications"]["mode"])
+        self.assertFalse(response.body["communications"]["live_send_enabled"])
+        self.assertEqual(405, self.request(
+            "POST", path, token=self.fixture.owner_token,
+            body={"live_send_enabled": True}).status)
 
 
 if __name__ == "__main__":

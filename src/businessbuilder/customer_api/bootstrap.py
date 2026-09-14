@@ -44,6 +44,8 @@ def create_postgres_customer_api(
     provider_connections=None,
     outbound_communications=None,
     communications_compliance=None,
+    live_canary_readiness=None,
+    clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
     if len(signing_key) < 32:
@@ -58,10 +60,10 @@ def create_postgres_customer_api(
     snapshots = CompanyBrainVerificationAdapter(company_brain)
     verification = VerificationService(verification_repository, default_registry())
     verification_port = RuntimeVerificationAdapter(
-        verification, snapshots, company_brain, clock=utc_now
+        verification, snapshots, company_brain, clock=clock
     )
     authority = PrincipalContextAuthority(
-        identity_repository, clock=utc_now, signing_key=signing_key
+        identity_repository, clock=clock, signing_key=signing_key
     )
     runtime = JobOrchestrator(
         repository=runtime_repository,
@@ -69,7 +71,7 @@ def create_postgres_customer_api(
         company_reader=CompanyBrainRuntimeAdapter(company_brain),
         verification=verification_port,
         id_factory=random_id,
-        clock=utc_now,
+        clock=clock,
         approval_principals=IdentityApprovalPrincipalVerifier(authority),
     )
     commercial = CommercialService(
@@ -77,9 +79,9 @@ def create_postgres_customer_api(
         AuthorizationPolicy(identity_repository),
         RuntimeCommercialEventSink(runtime.events),
         id_factory=random_id,
-        clock=utc_now,
+        clock=clock,
     )
-    seed_default_catalog(commercial_repository, effective_at=utc_now())
+    seed_default_catalog(commercial_repository, effective_at=clock())
     return CustomerApi(
         identity_repository=identity_repository,
         principal_authority=authority,
@@ -92,8 +94,9 @@ def create_postgres_customer_api(
         commercial=commercial,
         commercial_repository=commercial_repository,
         id_factory=random_id,
-        clock=utc_now,
+        clock=clock,
         provider_connections=provider_connections,
         outbound_communications=outbound_communications,
         communications_compliance=communications_compliance,
+        live_canary_readiness=live_canary_readiness,
     )

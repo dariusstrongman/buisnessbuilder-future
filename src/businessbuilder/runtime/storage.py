@@ -178,6 +178,10 @@ class RuntimeRepository(ABC):
     def reserve_communication_send(self, reservation: Any, limits: dict[str, int]) -> tuple[Any, bool, str]: ...
 
     @abstractmethod
+    def reserve_canary_send(self, reservation: Any, total_limit: int,
+                            hour_limit: int) -> tuple[Any, bool, str]: ...
+
+    @abstractmethod
     def claim_communication_event(self, kind: str, event_id: str) -> bool: ...
 
 
@@ -381,6 +385,19 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                     claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
                     PRIMARY KEY(kind, event_id)
                 );
+                CREATE TABLE IF NOT EXISTS canary_send_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    permit_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    communication_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    reserved_at TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    UNIQUE(permit_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS canary_send_permit_scope
+                    ON canary_send_reservations(permit_id, reserved_at);
                 """
             )
             self.connection.execute(
@@ -972,3 +989,36 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                 (kind, event_id),
             )
             return cursor.rowcount == 1
+
+    @staticmethod
+    def _canary_reservation(body: str):
+        from businessbuilder.live_canary.serialization import decode_canary_record
+        return decode_canary_record("live_canary_send_reservation", decode(body))
+
+    def reserve_canary_send(self, reservation, total_limit, hour_limit):
+        with self._lock, self.transaction():
+            row = self.connection.execute(
+                """SELECT body FROM canary_send_reservations
+                WHERE permit_id=? AND idempotency_key=?""",
+                (reservation.permit_id, reservation.idempotency_key)).fetchone()
+            if row:
+                return self._canary_reservation(row["body"]), False, "duplicate"
+            total = self.connection.execute(
+                "SELECT COUNT(*) AS n FROM canary_send_reservations WHERE permit_id=?",
+                (reservation.permit_id,)).fetchone()["n"]
+            if total >= total_limit:
+                return reservation, False, "canary total send cap exceeded"
+            cutoff = (reservation.reserved_at - timedelta(hours=1)).isoformat()
+            hourly = self.connection.execute(
+                """SELECT COUNT(*) AS n FROM canary_send_reservations
+                WHERE permit_id=? AND reserved_at>=?""",
+                (reservation.permit_id, cutoff)).fetchone()["n"]
+            if hourly >= hour_limit:
+                return reservation, False, "canary hourly send cap exceeded"
+            self.connection.execute(
+                "INSERT INTO canary_send_reservations VALUES (?,?,?,?,?,?,?,?)",
+                (reservation.reservation_id, reservation.permit_id,
+                 reservation.tenant_id, reservation.company_id,
+                 reservation.communication_id, reservation.idempotency_key,
+                 reservation.reserved_at.isoformat(), encode(reservation)))
+            return reservation, True, "reserved"

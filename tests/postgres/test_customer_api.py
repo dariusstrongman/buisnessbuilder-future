@@ -88,6 +88,7 @@ class PostgresCustomerApiTests(unittest.TestCase):
             signing_key=b"postgres-customer-api-key-32-bytes-minimum",
             dsn=dsn,
             schema=schema,
+            clock=lambda: NOW,
         )
         headers = {"Authorization": f"Bearer {token}"}
         me = application.handle(

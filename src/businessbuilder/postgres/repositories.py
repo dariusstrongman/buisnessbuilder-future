@@ -1245,8 +1245,7 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
                     receipt_id, tenant_id, company_id, job_id, capability, provider,
                     operation, idempotency_key, status, body
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT(tenant_id, company_id, provider, operation, idempotency_key)
-                    DO NOTHING RETURNING receipt_id""",
+                    ON CONFLICT DO NOTHING RETURNING receipt_id""",
                     (receipt.receipt_id, receipt.tenant_id, receipt.company_id, receipt.job_id,
                      receipt.capability, receipt.provider, receipt.operation,
                      receipt.idempotency_key, receipt.status.value, encode(receipt)),
@@ -1435,6 +1434,43 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
                 (kind, event_id),
             )
             return cursor.fetchone() is not None
+
+    @staticmethod
+    def _canary_reservation(body: str):
+        from businessbuilder.live_canary.serialization import decode_canary_record
+        return decode_canary_record("live_canary_send_reservation", decode(body))
+
+    def reserve_canary_send(self, reservation, total_limit, hour_limit):
+        lock_key = int(sha256(f"{reservation.permit_id}\0canary".encode()).hexdigest()[:15], 16)
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+                cursor.execute(
+                    """SELECT body FROM bb_canary_send_reservations
+                    WHERE permit_id=%s AND idempotency_key=%s FOR UPDATE""",
+                    (reservation.permit_id, reservation.idempotency_key))
+                row = cursor.fetchone()
+                if row:
+                    return self._canary_reservation(row["body"]), False, "duplicate"
+                cursor.execute("SELECT COUNT(*) AS n FROM bb_canary_send_reservations WHERE permit_id=%s",
+                               (reservation.permit_id,))
+                if cursor.fetchone()["n"] >= total_limit:
+                    return reservation, False, "canary total send cap exceeded"
+                cursor.execute(
+                    """SELECT COUNT(*) AS n FROM bb_canary_send_reservations
+                    WHERE permit_id=%s AND reserved_at>=%s""",
+                    (reservation.permit_id, reservation.reserved_at - timedelta(hours=1)))
+                if cursor.fetchone()["n"] >= hour_limit:
+                    return reservation, False, "canary hourly send cap exceeded"
+                cursor.execute(
+                    """INSERT INTO bb_canary_send_reservations(
+                    reservation_id,permit_id,tenant_id,company_id,communication_id,
+                    idempotency_key,reserved_at,body) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (reservation.reservation_id, reservation.permit_id,
+                     reservation.tenant_id, reservation.company_id,
+                     reservation.communication_id, reservation.idempotency_key,
+                     reservation.reserved_at, encode(reservation)))
+                return reservation, True, "reserved"
 
 
 class PostgresVerificationRepository(VerificationRepository, _PostgresRepository):

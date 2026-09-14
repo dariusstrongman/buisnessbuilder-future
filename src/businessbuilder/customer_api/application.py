@@ -66,6 +66,9 @@ _DELIVERY_ROUTE = re.compile(
 _COMPLIANCE_STATUS_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/communications/compliance-status$"
 )
+_CANARY_READINESS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/communications/canary-readiness$"
+)
 _COMPLIANCE_ALERTS_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/communications/alerts$"
 )
@@ -128,6 +131,7 @@ class CustomerApi:
         provider_connections=None,
         outbound_communications=None,
         communications_compliance=None,
+        live_canary_readiness=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -144,6 +148,7 @@ class CustomerApi:
         self.provider_connections = provider_connections
         self.outbound_communications = outbound_communications
         self.communications_compliance = communications_compliance
+        self.live_canary_readiness = live_canary_readiness
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -450,6 +455,18 @@ class CustomerApi:
                 self.communications_compliance.customer_status(
                     principal, tenant_id=principal.tenant_id, company_id=company_id)})
 
+        match = _CANARY_READINESS_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            if self.live_canary_readiness is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id = match.group(1)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id)
+            return ApiResponse(HTTPStatus.OK, {"communications":
+                self.live_canary_readiness.customer_status(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id)})
+
         match = _COMPLIANCE_ALERTS_ROUTE.fullmatch(path)
         if match:
             self._method(method, "GET")
@@ -700,6 +717,7 @@ class CustomerApi:
                 or _COMMUNICATIONS_ROUTE.fullmatch(path)
                 or _DELIVERY_ROUTE.fullmatch(path)
                 or _COMPLIANCE_STATUS_ROUTE.fullmatch(path)
+                or _CANARY_READINESS_ROUTE.fullmatch(path)
                 or _COMPLIANCE_ALERTS_ROUTE.fullmatch(path)
                 or _CONSENT_ROUTE.fullmatch(path)):
             return ("GET",)

@@ -154,6 +154,7 @@ class CommunicationRequest:
     created_at: datetime
     expires_at: datetime
     requires_founder_approval: bool = False
+    canary_permit_ref: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -171,6 +172,8 @@ class CommunicationRequest:
             _id(self.context_ref, "context_ref")
         if self.approval_ref:
             _id(self.approval_ref, "approval_ref")
+        if self.canary_permit_ref:
+            _id(self.canary_permit_ref, "canary_permit_ref")
         if self.bulk_count < 1:
             raise ValueError("bulk_count must be positive")
         _time(self.created_at, "created_at")

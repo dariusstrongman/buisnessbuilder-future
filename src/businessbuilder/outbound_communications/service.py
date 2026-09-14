@@ -195,6 +195,7 @@ class OutboundCommunicationSafety:
         approval_ref: str | None = None,
         bulk_count: int = 1,
         expires_in: timedelta = timedelta(minutes=15),
+        canary_permit_ref: str | None = None,
     ) -> CommunicationRequest:
         if capability != "communications.email" or not isinstance(content, str) or not content or len(content.encode()) > 64_000:
             raise ValueError("communication content is invalid")
@@ -228,7 +229,7 @@ class OutboundCommunicationSafety:
             capability, provider_connection_id, runtime_idempotency_key,
             sha256(content.encode()).hexdigest(), flags, evidence.company_fact_refs,
             context_ref, approval_ref, bulk_count, now, now + expires_in,
-            evidence.sensitive_or_high_impact,
+            evidence.sensitive_or_high_impact, canary_permit_ref,
         )
         if self.compliance is not None:
             self.compliance.evaluate_admission(value)
