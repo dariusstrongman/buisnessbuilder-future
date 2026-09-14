@@ -99,8 +99,10 @@ execution provider is the deterministic staging adapter.
 
 ## Remaining production work
 
-Before live customer execution, add audited capability-scoped secret resolution,
-a real provider adapter with durable provider idempotency receipts, artifact
-content storage/authorization, observability and alarms, and a reviewed policy
-for maximum execution duration and in-flight drain. Those additions must retain
-the envelope and Runtime authority boundaries defined here.
+The capability-scoped secret resolution, artifact authorization, and durable
+provider receipt boundary is implemented in `SECRET_ARTIFACT_BROKER.md`. Before
+live customer execution, add reviewed live provider adapters, upload quarantine
+scanning, workload-identity enforcement for the broker boundary, observability
+and alarms, and a reviewed policy for maximum execution duration and in-flight
+drain. Those additions must retain the envelope and Runtime authority boundaries
+defined here.

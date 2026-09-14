@@ -33,6 +33,9 @@ from .models import ModelCandidate
 from .queue import QueuePort
 from .service import AgentOutboxDispatcher, AgentRuntimeService, SharedAgentWorker
 from businessbuilder.runtime import Money
+from businessbuilder.access_broker.capability import BrokeredAgentCapability
+from businessbuilder.access_broker.ports import ArtifactStorePort, ExternalProviderPort, SecretStorePort
+from businessbuilder.access_broker.service import SecretArtifactBroker
 
 
 SAFE_CAPABILITIES = (
@@ -61,6 +64,7 @@ class PostgresAgentRuntime:
     workforce: WorkforcePolicyService
     runtime: JobOrchestrator
     service: AgentRuntimeService
+    broker: SecretArtifactBroker | None
     dispatcher: AgentOutboxDispatcher
     worker: SharedAgentWorker
 
@@ -85,6 +89,9 @@ def create_postgres_agent_runtime(
     dsn: str | None = None,
     schema: str | None = None,
     clock=utc_now,
+    secret_store: SecretStorePort | None = None,
+    artifact_store: ArtifactStorePort | None = None,
+    external_providers: dict[str, ExternalProviderPort] | None = None,
 ) -> PostgresAgentRuntime:
     if len(signing_key) < 32:
         raise ValueError("agent Runtime signing key must contain at least 32 bytes")
@@ -101,8 +108,6 @@ def create_postgres_agent_runtime(
         identity_repository, clock=clock, signing_key=signing_key
     )
     registry = CapabilityRegistry()
-    for capability in SAFE_CAPABILITIES:
-        registry.register(DeterministicAgentCapability(capability))
     runtime = JobOrchestrator(
         repository=runtime_repository,
         registry=registry,
@@ -148,6 +153,26 @@ def create_postgres_agent_runtime(
         clock=clock,
         id_factory=random_id,
     )
+    broker = None
+    broker_parts = (secret_store is not None, artifact_store is not None, bool(external_providers))
+    if any(broker_parts) and not all(broker_parts):
+        raise ValueError("brokered Runtime requires secret, artifact, and provider adapters")
+    if all(broker_parts):
+        assert secret_store is not None and artifact_store is not None and external_providers
+        broker = SecretArtifactBroker(
+            repository=runtime_repository,
+            agent_runtime=service,
+            secret_store=secret_store,
+            artifact_store=artifact_store,
+            providers=external_providers,
+            clock=clock,
+            id_factory=random_id,
+        )
+    for capability in SAFE_CAPABILITIES:
+        if broker and capability == "communications.email":
+            registry.register(BrokeredAgentCapability(capability, broker, estimated_minor=3))
+        else:
+            registry.register(DeterministicAgentCapability(capability))
     return PostgresAgentRuntime(
         identity_repository,
         commercial_repository,
@@ -160,6 +185,7 @@ def create_postgres_agent_runtime(
         workforce,
         runtime,
         service,
+        broker,
         AgentOutboxDispatcher(
             runtime_repository, queue, dispatcher_id=dispatcher_id, clock=clock
         ),

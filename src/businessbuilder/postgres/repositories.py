@@ -1180,6 +1180,123 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
             )
             return tuple(self._runtime_schedule(row["body"]) for row in cursor)
 
+    @staticmethod
+    def _broker_record(kind: str, body: str):
+        from businessbuilder.access_broker.serialization import decode_broker_record
+        return decode_broker_record(kind, decode(body))
+
+    def save_broker_record(self, kind: str, record_id: str, tenant_id: str, company_id: str, record: Any) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT tenant_id, company_id FROM bb_broker_records WHERE kind=%s AND record_id=%s",
+                (kind, record_id),
+            )
+            existing = cursor.fetchone()
+            if existing and (existing["tenant_id"], existing["company_id"]) != (tenant_id, company_id):
+                raise PermissionError("broker record identifier is already owned by another scope")
+            cursor.execute(
+                """INSERT INTO bb_broker_records(kind, record_id, tenant_id, company_id, body)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(kind, record_id) DO UPDATE SET body=EXCLUDED.body
+                WHERE bb_broker_records.tenant_id=EXCLUDED.tenant_id
+                  AND bb_broker_records.company_id=EXCLUDED.company_id""",
+                (kind, record_id, tenant_id, company_id, encode(record)),
+            )
+
+    def get_broker_record(self, kind: str, tenant_id: str, company_id: str, record_id: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_broker_records WHERE kind=%s AND tenant_id=%s
+                AND company_id=%s AND record_id=%s""",
+                (kind, tenant_id, company_id, record_id),
+            )
+            row = cursor.fetchone()
+        return self._broker_record(kind, row["body"]) if row else None
+
+    def list_broker_records(self, kind: str, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_broker_records WHERE kind=%s AND tenant_id=%s
+                AND company_id=%s ORDER BY record_id""",
+                (kind, tenant_id, company_id),
+            )
+            return tuple(self._broker_record(kind, row["body"]) for row in cursor)
+
+    @staticmethod
+    def _provider_receipt(body: str):
+        from businessbuilder.access_broker.serialization import decode_provider_receipt
+        return decode_provider_receipt(decode(body))
+
+    def claim_provider_receipt(self, receipt: Any) -> tuple[Any, bool]:
+        from businessbuilder.access_broker.models import ReceiptStatus
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO bb_provider_receipts(
+                    receipt_id, tenant_id, company_id, job_id, capability, provider,
+                    operation, idempotency_key, status, body
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(tenant_id, company_id, provider, operation, idempotency_key)
+                    DO NOTHING RETURNING receipt_id""",
+                    (receipt.receipt_id, receipt.tenant_id, receipt.company_id, receipt.job_id,
+                     receipt.capability, receipt.provider, receipt.operation,
+                     receipt.idempotency_key, receipt.status.value, encode(receipt)),
+                )
+                inserted = cursor.fetchone() is not None
+                cursor.execute(
+                    """SELECT receipt_id, body FROM bb_provider_receipts WHERE tenant_id=%s
+                    AND company_id=%s AND provider=%s AND operation=%s AND idempotency_key=%s
+                    FOR UPDATE""",
+                    (receipt.tenant_id, receipt.company_id, receipt.provider,
+                     receipt.operation, receipt.idempotency_key),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("provider receipt claim was not persisted")
+                current = self._provider_receipt(row["body"])
+                if inserted:
+                    return current, True
+                if current.status is ReceiptStatus.FAILED and current.retryable:
+                    retried = replace(
+                        current, status=ReceiptStatus.IN_PROGRESS,
+                        attempts=current.attempts + 1, retryable=False, completed_at=None,
+                    )
+                    cursor.execute(
+                        "UPDATE bb_provider_receipts SET status=%s, body=%s WHERE receipt_id=%s",
+                        (retried.status.value, encode(retried), retried.receipt_id),
+                    )
+                    return retried, True
+                return current, False
+
+    def complete_provider_receipt(self, receipt: Any) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """UPDATE bb_provider_receipts SET status=%s, body=%s
+                WHERE receipt_id=%s AND tenant_id=%s AND company_id=%s AND job_id=%s""",
+                (receipt.status.value, encode(receipt), receipt.receipt_id,
+                 receipt.tenant_id, receipt.company_id, receipt.job_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("provider receipt not found in tenant/company scope")
+
+    def get_provider_receipt(self, tenant_id: str, company_id: str, provider: str, operation: str, idempotency_key: str):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_provider_receipts WHERE tenant_id=%s AND company_id=%s
+                AND provider=%s AND operation=%s AND idempotency_key=%s""",
+                (tenant_id, company_id, provider, operation, idempotency_key),
+            )
+            row = cursor.fetchone()
+        return self._provider_receipt(row["body"]) if row else None
+
+    def list_provider_receipts(self, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_provider_receipts WHERE tenant_id=%s AND company_id=%s ORDER BY receipt_id",
+                (tenant_id, company_id),
+            )
+            return tuple(self._provider_receipt(row["body"]) for row in cursor)
+
 
 class PostgresVerificationRepository(VerificationRepository, _PostgresRepository):
     """Append-versioned PostgreSQL store for Verification-owned readiness evidence."""

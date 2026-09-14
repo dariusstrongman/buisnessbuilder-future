@@ -1,5 +1,4 @@
 from .capabilities import DeterministicAgentCapability, SAFE_AGENT_ACTIONS
-from .bootstrap import PostgresAgentRuntime, create_postgres_agent_runtime
 from .model_router import ModelRouter, NoEligibleModel
 from .models import (
     AgentJobEnvelope,
@@ -36,3 +35,13 @@ __all__ = [
     "EventBridgeSchedulerAdapter", "RuntimeScheduler",
     "PostgresAgentRuntime", "create_postgres_agent_runtime",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"PostgresAgentRuntime", "create_postgres_agent_runtime"}:
+        from .bootstrap import PostgresAgentRuntime, create_postgres_agent_runtime
+        return {
+            "PostgresAgentRuntime": PostgresAgentRuntime,
+            "create_postgres_agent_runtime": create_postgres_agent_runtime,
+        }[name]
+    raise AttributeError(name)

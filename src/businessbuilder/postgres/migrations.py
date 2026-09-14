@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 3
+MIGRATION_VERSION = 4
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -187,6 +187,32 @@ CREATE TABLE IF NOT EXISTS bb_runtime_schedules (
 );
 CREATE INDEX IF NOT EXISTS bb_runtime_schedules_due
     ON bb_runtime_schedules (enabled, next_due_at);
+
+CREATE TABLE IF NOT EXISTS bb_broker_records (
+    kind TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (kind, record_id)
+);
+CREATE INDEX IF NOT EXISTS bb_broker_records_scope
+    ON bb_broker_records (tenant_id, company_id, kind, record_id);
+CREATE TABLE IF NOT EXISTS bb_provider_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('in_progress', 'succeeded', 'failed', 'refused')),
+    body TEXT NOT NULL,
+    UNIQUE (tenant_id, company_id, provider, operation, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS bb_provider_receipts_scope
+    ON bb_provider_receipts (tenant_id, company_id, job_id);
 
 CREATE TABLE IF NOT EXISTS bb_ai_workforce_records (
     kind TEXT NOT NULL,

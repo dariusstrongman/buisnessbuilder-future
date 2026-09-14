@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from businessbuilder.runtime.models import ArtifactRef, Money
+from businessbuilder.access_broker.models import JobSecretRef
 
 
 class TriggerClass(StrEnum):
@@ -99,6 +100,7 @@ class AgentJobEnvelope:
     policy_definition_digest: str
     created_at: datetime
     expires_at: datetime
+    secret_refs: tuple[JobSecretRef, ...] = ()
 
     def __post_init__(self) -> None:
         required = (
@@ -135,7 +137,7 @@ class AgentJobEnvelope:
         return "sha256:" + sha256(self.to_json().encode()).hexdigest()
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": "agent-job.v1",
             "tenant_id": self.tenant_id,
             "company_id": self.company_id,
@@ -171,6 +173,9 @@ class AgentJobEnvelope:
             "created_at": _iso(self.created_at),
             "expires_at": _iso(self.expires_at),
         }
+        if self.secret_refs:
+            payload["secret_refs"] = [item.to_contract() for item in self.secret_refs]
+        return payload
 
     def to_json(self) -> str:
         return json.dumps(self.to_payload(), sort_keys=True, separators=(",", ":"))
@@ -215,6 +220,7 @@ class AgentJobEnvelope:
             policy_definition_digest=value["policy_definition_digest"],
             created_at=datetime.fromisoformat(value["created_at"].replace("Z", "+00:00")),
             expires_at=datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00")),
+            secret_refs=tuple(JobSecretRef(**item) for item in value.get("secret_refs", ())),
         )
 
 
@@ -291,7 +297,7 @@ def _iso(value: datetime) -> str:
 
 
 SENSITIVE_KEY_PARTS = frozenset(
-    {"password", "secret", "credential", "authorization", "access_key", "private_key", "token"}
+    {"api_key", "password", "secret", "credential", "authorization", "access_key", "private_key", "token"}
 )
 
 
@@ -299,6 +305,16 @@ def assert_queue_payload_safe(value: object) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             normalized = str(key).lower()
+            if normalized == "secret_refs":
+                if not isinstance(item, list):
+                    raise ValueError("queue secret_refs must be a list of opaque references")
+                for reference in item:
+                    if not isinstance(reference, dict) or set(reference) != {
+                        "secret_ref", "provider", "capability", "tenant_id", "company_id"
+                    }:
+                        raise ValueError("queue secret reference contains unexpected fields")
+                    JobSecretRef(**reference)
+                continue
             if any(part in normalized for part in SENSITIVE_KEY_PARTS):
                 raise ValueError("queue payload contains a prohibited sensitive field")
             assert_queue_payload_safe(item)

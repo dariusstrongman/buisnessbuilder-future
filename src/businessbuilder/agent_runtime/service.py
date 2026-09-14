@@ -23,6 +23,7 @@ from businessbuilder.runtime import ApprovalMode, ArtifactRef, Event, Job, JobSt
 from businessbuilder.runtime.budgets import BudgetExceeded
 from businessbuilder.runtime.orchestrator import JobOrchestrator
 from businessbuilder.runtime.storage import RuntimeRepository
+from businessbuilder.access_broker.models import JobSecretRef
 
 from .model_router import ModelRouter, NoEligibleModel
 from .models import (
@@ -148,6 +149,7 @@ class AgentRuntimeService:
         principal: AuthenticatedPrincipal | None = None,
         causation_id: str | None = None,
         input_artifact_refs: tuple[ArtifactRef, ...] = (),
+        secret_refs: tuple[JobSecretRef, ...] = (),
         context_flags: frozenset[str] = frozenset(),
         model_policy: ModelPolicy = ModelPolicy(quality_floor=70),
         expires_in: timedelta = timedelta(minutes=15),
@@ -234,6 +236,7 @@ class AgentRuntimeService:
                     "model": selection.model,
                     "model_estimated_minor": selection.estimated_cost.minor_units,
                     "input_artifact_refs": [item.to_contract() for item in input_artifact_refs],
+                    "secret_refs": [item.to_contract() for item in secret_refs],
                     "trigger_ref": trigger_ref,
                 },
                 budget_ref=budget_ref,
@@ -255,7 +258,7 @@ class AgentRuntimeService:
                 envelope = self._envelope(
                     job, role_id, role.version, action, entitlement_refs, evaluation,
                     selection, model_policy, input_artifact_refs, trigger_class,
-                    trigger_ref, actor_id, now, expires_in, reserved,
+                    trigger_ref, actor_id, now, expires_in, reserved, secret_refs,
                 )
                 self.repository.save_agent_admission(
                     envelope,
@@ -379,6 +382,7 @@ class AgentRuntimeService:
         self, job, role_id, role_version, action, entitlement_refs, evaluation,
         selection, model_policy, input_artifact_refs, trigger_class, trigger_ref,
         actor_id, now, expires_in, reserved,
+        secret_refs,
     ):
         return AgentJobEnvelope(
             job.tenant_id, job.company_id, job.job_id, job.correlation_id,
@@ -389,6 +393,7 @@ class AgentRuntimeService:
             input_artifact_refs, 1, job.retry_policy.max_attempts, job.idempotency_key,
             trigger_class, trigger_ref, actor_id, evaluation.evaluation_id,
             evaluation.definition_digest or "", now, now + expires_in,
+            secret_refs,
         )
 
     def _audit_admission(self, job, actor_id, role_id, capability, entitlement_refs, evaluation, selection):

@@ -146,7 +146,7 @@ class PostgresOutboxDurabilityTests(unittest.TestCase):
         self.assertEqual((), reopened.list_outbox())
         with reopened.connection.cursor() as cursor:
             cursor.execute("SELECT version FROM bb_schema_migrations ORDER BY version")
-            self.assertEqual([3], [row["version"] for row in cursor])
+            self.assertEqual([4], [row["version"] for row in cursor])
         reopened.close()
 
         migrated_again = PostgresCommercialRepository(self.dsn, schema=self.schema)

@@ -18,6 +18,8 @@ def _json_default(value: Any) -> Any:
         return {"__datetime__": value.isoformat()}
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=str)
     if hasattr(value, "__dataclass_fields__"):
         return asdict(value)
     raise TypeError(f"cannot serialize {type(value)!r}")
@@ -126,6 +128,27 @@ class RuntimeRepository(ABC):
 
     @abstractmethod
     def list_due_runtime_schedules(self, *, at: datetime, limit: int) -> tuple[Any, ...]: ...
+
+    @abstractmethod
+    def save_broker_record(self, kind: str, record_id: str, tenant_id: str, company_id: str, record: Any) -> None: ...
+
+    @abstractmethod
+    def get_broker_record(self, kind: str, tenant_id: str, company_id: str, record_id: str) -> Any: ...
+
+    @abstractmethod
+    def list_broker_records(self, kind: str, tenant_id: str, company_id: str) -> tuple[Any, ...]: ...
+
+    @abstractmethod
+    def claim_provider_receipt(self, receipt: Any) -> tuple[Any, bool]: ...
+
+    @abstractmethod
+    def complete_provider_receipt(self, receipt: Any) -> None: ...
+
+    @abstractmethod
+    def get_provider_receipt(self, tenant_id: str, company_id: str, provider: str, operation: str, idempotency_key: str) -> Any: ...
+
+    @abstractmethod
+    def list_provider_receipts(self, tenant_id: str, company_id: str) -> tuple[Any, ...]: ...
 
 
 class SQLiteRuntimeRepository(RuntimeRepository):
@@ -260,6 +283,31 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                     enabled INTEGER NOT NULL,
                     body TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS broker_records (
+                    kind TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    PRIMARY KEY(kind, record_id)
+                );
+                CREATE INDEX IF NOT EXISTS broker_records_scope
+                    ON broker_records(tenant_id, company_id, kind, record_id);
+                CREATE TABLE IF NOT EXISTS provider_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    UNIQUE(tenant_id, company_id, provider, operation, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS provider_receipts_scope
+                    ON provider_receipts(tenant_id, company_id, job_id);
                 """
             )
             self.connection.execute(
@@ -639,3 +687,89 @@ class SQLiteRuntimeRepository(RuntimeRepository):
             (at.isoformat(), limit),
         ).fetchall()
         return tuple(self._runtime_schedule(row["body"]) for row in rows)
+
+    @staticmethod
+    def _broker_record(kind: str, body: str):
+        from businessbuilder.access_broker.serialization import decode_broker_record
+        return decode_broker_record(kind, decode(body))
+
+    def save_broker_record(self, kind: str, record_id: str, tenant_id: str, company_id: str, record: Any) -> None:
+        with self._lock, self._write():
+            existing = self.connection.execute(
+                "SELECT tenant_id, company_id FROM broker_records WHERE kind=? AND record_id=?",
+                (kind, record_id),
+            ).fetchone()
+            if existing and (existing["tenant_id"], existing["company_id"]) != (tenant_id, company_id):
+                raise PermissionError("broker record identifier is already owned by another scope")
+            self.connection.execute(
+                """INSERT INTO broker_records(kind, record_id, tenant_id, company_id, body)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, record_id) DO UPDATE SET body=excluded.body
+                WHERE broker_records.tenant_id=excluded.tenant_id AND broker_records.company_id=excluded.company_id""",
+                (kind, record_id, tenant_id, company_id, encode(record)),
+            )
+
+    def get_broker_record(self, kind: str, tenant_id: str, company_id: str, record_id: str):
+        row = self.connection.execute(
+            "SELECT body FROM broker_records WHERE kind=? AND tenant_id=? AND company_id=? AND record_id=?",
+            (kind, tenant_id, company_id, record_id),
+        ).fetchone()
+        return self._broker_record(kind, row["body"]) if row else None
+
+    def list_broker_records(self, kind: str, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM broker_records WHERE kind=? AND tenant_id=? AND company_id=? ORDER BY record_id",
+            (kind, tenant_id, company_id),
+        ).fetchall()
+        return tuple(self._broker_record(kind, row["body"]) for row in rows)
+
+    @staticmethod
+    def _provider_receipt(body: str):
+        from businessbuilder.access_broker.serialization import decode_provider_receipt
+        return decode_provider_receipt(decode(body))
+
+    def claim_provider_receipt(self, receipt: Any) -> tuple[Any, bool]:
+        from dataclasses import replace
+        from businessbuilder.access_broker.models import ReceiptStatus
+        with self._lock, self.transaction():
+            row = self.connection.execute(
+                """SELECT body FROM provider_receipts WHERE tenant_id=? AND company_id=?
+                AND provider=? AND operation=? AND idempotency_key=?""",
+                (receipt.tenant_id, receipt.company_id, receipt.provider, receipt.operation, receipt.idempotency_key),
+            ).fetchone()
+            if row:
+                current = self._provider_receipt(row["body"])
+                if current.status is ReceiptStatus.FAILED and current.retryable:
+                    retried = replace(current, status=ReceiptStatus.IN_PROGRESS, attempts=current.attempts + 1, retryable=False, completed_at=None)
+                    self.complete_provider_receipt(retried)
+                    return retried, True
+                return current, False
+            self.connection.execute(
+                "INSERT INTO provider_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (receipt.receipt_id, receipt.tenant_id, receipt.company_id, receipt.job_id, receipt.capability, receipt.provider, receipt.operation, receipt.idempotency_key, receipt.status.value, encode(receipt)),
+            )
+            return receipt, True
+
+    def complete_provider_receipt(self, receipt: Any) -> None:
+        with self._lock, self._write():
+            cursor = self.connection.execute(
+                """UPDATE provider_receipts SET status=?, body=? WHERE receipt_id=? AND tenant_id=?
+                AND company_id=? AND job_id=?""",
+                (receipt.status.value, encode(receipt), receipt.receipt_id, receipt.tenant_id, receipt.company_id, receipt.job_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("provider receipt not found in tenant/company scope")
+
+    def get_provider_receipt(self, tenant_id: str, company_id: str, provider: str, operation: str, idempotency_key: str):
+        row = self.connection.execute(
+            """SELECT body FROM provider_receipts WHERE tenant_id=? AND company_id=?
+            AND provider=? AND operation=? AND idempotency_key=?""",
+            (tenant_id, company_id, provider, operation, idempotency_key),
+        ).fetchone()
+        return self._provider_receipt(row["body"]) if row else None
+
+    def list_provider_receipts(self, tenant_id: str, company_id: str) -> tuple[Any, ...]:
+        rows = self.connection.execute(
+            "SELECT body FROM provider_receipts WHERE tenant_id=? AND company_id=? ORDER BY receipt_id",
+            (tenant_id, company_id),
+        ).fetchall()
+        return tuple(self._provider_receipt(row["body"]) for row in rows)
