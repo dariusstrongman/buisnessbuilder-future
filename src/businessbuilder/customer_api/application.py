@@ -51,6 +51,18 @@ _PROVIDER_CONNECTIONS_ROUTE = re.compile(
 _PROVIDER_CONNECTION_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections/([A-Za-z0-9_-]{1,160})(?:/(disconnect|reconnect))?$"
 )
+_RECIPIENT_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/recipients/([A-Za-z0-9_.:-]{3,160})(?:/(suppression|opt-out|re-enable))?$"
+)
+_COMMUNICATION_POLICY_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/communication-policy$"
+)
+_COMMUNICATIONS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/communications$"
+)
+_DELIVERY_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/deliveries/([A-Za-z0-9_.:-]{3,160})$"
+)
 _FORGED_AUTHORITY_HEADERS = frozenset(
     {"x-actor-id", "x-actor-role", "x-user-id", "x-tenant-id", "x-company-id"}
 )
@@ -98,6 +110,7 @@ class CustomerApi:
         id_factory: Callable[[str], str],
         clock: Callable[[], datetime],
         provider_connections=None,
+        outbound_communications=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -112,6 +125,7 @@ class CustomerApi:
         self.id_factory = id_factory
         self.clock = clock
         self.provider_connections = provider_connections
+        self.outbound_communications = outbound_communications
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -334,6 +348,78 @@ class CustomerApi:
                 )
             return ApiResponse(HTTPStatus.OK, {"provider_connection": self._provider_connection(connection)})
 
+        match = _RECIPIENT_ROUTE.fullmatch(path)
+        if match:
+            if self.outbound_communications is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, recipient_id, action = match.groups()
+            permission = Permission.MANAGE_COMMUNICATIONS if action in {"opt-out", "re-enable"} else Permission.VIEW_COMPANY_STATE
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                permission, request_id, correlation_id)
+            if action == "opt-out":
+                self._method(method, "POST")
+                values = self._object(body, required={"event_id"}, allowed={"event_id", "reason"})
+                recipient = self.outbound_communications.opt_out(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    recipient_id=recipient_id,
+                    event_id=self._identifier(values["event_id"], "event_id"),
+                    reason=self._identifier(values.get("reason", "customer_request"), "reason"),
+                )
+            elif action == "re-enable":
+                self._method(method, "POST")
+                values = self._object(body, required={"consent_provenance"}, allowed={"consent_provenance"})
+                recipient = self.outbound_communications.explicitly_reenable(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    recipient_id=recipient_id,
+                    consent_provenance=self._identifier(values["consent_provenance"], "consent_provenance"),
+                )
+            else:
+                self._method(method, "GET")
+                recipient = self.outbound_communications.get_recipient(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id,
+                    recipient_id=recipient_id,
+                )
+            if action == "suppression":
+                return ApiResponse(HTTPStatus.OK, {"suppression": self._suppression(recipient)})
+            return ApiResponse(HTTPStatus.OK, {"recipient": self._recipient(recipient)})
+
+        match = _COMMUNICATION_POLICY_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            if self.outbound_communications is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id = match.group(1)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id)
+            value = self.outbound_communications.policy_status(
+                principal, tenant_id=principal.tenant_id, company_id=company_id)
+            return ApiResponse(HTTPStatus.OK, {"communication_policy": value})
+
+        match = _COMMUNICATIONS_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            if self.outbound_communications is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id = match.group(1)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id)
+            values = self.outbound_communications.list_deliveries(
+                principal, tenant_id=principal.tenant_id, company_id=company_id)
+            return ApiResponse(HTTPStatus.OK, {"communications": [self._delivery(item) for item in values]})
+
+        match = _DELIVERY_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            if self.outbound_communications is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            company_id, delivery_id = match.groups()
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id)
+            value = self.outbound_communications.get_delivery(
+                principal, tenant_id=principal.tenant_id, company_id=company_id,
+                delivery_id=delivery_id)
+            return ApiResponse(HTTPStatus.OK, {"delivery": self._delivery(value)})
+
         match = _COMPANY_CHILD_ROUTE.fullmatch(path)
         if match:
             company_id, child = match.groups()
@@ -479,6 +565,13 @@ class CustomerApi:
         provider = _PROVIDER_CONNECTION_ROUTE.fullmatch(path)
         if provider:
             return ("POST",) if provider.group(3) else ("GET",)
+        recipient = _RECIPIENT_ROUTE.fullmatch(path)
+        if recipient:
+            return ("POST",) if recipient.group(3) in {"opt-out", "re-enable"} else ("GET",)
+        if (_COMMUNICATION_POLICY_ROUTE.fullmatch(path)
+                or _COMMUNICATIONS_ROUTE.fullmatch(path)
+                or _DELIVERY_ROUTE.fullmatch(path)):
+            return ("GET",)
         if (
             path in {
                 "/api/v1/me",
@@ -786,6 +879,48 @@ class CustomerApi:
             "expires_at": CustomerApi._time(item.expires_at),
             "refreshed_at": CustomerApi._time(item.refreshed_at),
             "revoked_at": CustomerApi._time(item.revoked_at),
+        }
+
+    @staticmethod
+    def _recipient(item):
+        local, _, domain = item.normalized_destination.partition("@")
+        hint = (local[:1] + "***@" + domain) if local and domain else "hidden"
+        return {
+            "recipient_id": item.recipient_id,
+            "destination_type": item.destination_type.value,
+            "destination_hint": hint,
+            "relationship": item.relationship.value,
+            "consent_state": item.consent_state.value,
+            "consent_at": CustomerApi._time(item.consent_at),
+            "suppression_state": item.suppression_state.value,
+            "opt_out_at": CustomerApi._time(item.opt_out_at),
+            "last_contacted_at": CustomerApi._time(item.last_contacted_at),
+            "updated_at": CustomerApi._time(item.updated_at),
+        }
+
+    @staticmethod
+    def _suppression(item):
+        return {
+            "recipient_id": item.recipient_id,
+            "state": item.suppression_state.value,
+            "reason": item.suppression_reason,
+            "opt_out_at": CustomerApi._time(item.opt_out_at),
+            "updated_at": CustomerApi._time(item.updated_at),
+        }
+
+    @staticmethod
+    def _delivery(item):
+        return {
+            "delivery_id": item.delivery_id,
+            "communication_id": item.communication_id,
+            "recipient_id": item.recipient_id,
+            "provider": item.provider,
+            "purpose": item.purpose.value,
+            "status": item.status.value,
+            "response_classification": item.response_classification,
+            "reconciliation_status": item.reconciliation_status,
+            "created_at": CustomerApi._time(item.created_at),
+            "updated_at": CustomerApi._time(item.updated_at),
         }
 
     @staticmethod

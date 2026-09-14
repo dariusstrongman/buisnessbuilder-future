@@ -1377,6 +1377,65 @@ class PostgresRuntimeRepository(RuntimeRepository, _PostgresRepository):
             )
             return cursor.fetchone() is not None
 
+    @staticmethod
+    def _communication_reservation(body: str):
+        from businessbuilder.outbound_communications.serialization import decode_communication_record
+        return decode_communication_record("communication_rate_reservation", decode(body))
+
+    def reserve_communication_send(self, reservation, limits):
+        lock_key = int(sha256(
+            f"{reservation.tenant_id}\0{reservation.company_id}\0communications".encode()
+        ).hexdigest()[:15], 16)
+        windows = (
+            ("company_minute", None, timedelta(minutes=1)),
+            ("company_hour", None, timedelta(hours=1)),
+            ("company_day", None, timedelta(days=1)),
+            ("recipient_minute", reservation.recipient_id, timedelta(minutes=1)),
+            ("recipient_hour", reservation.recipient_id, timedelta(hours=1)),
+            ("recipient_day", reservation.recipient_id, timedelta(days=1)),
+            ("burst", reservation.recipient_id, timedelta(seconds=10)),
+        )
+        with self.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
+                cursor.execute(
+                    """SELECT body FROM bb_communication_send_reservations
+                    WHERE tenant_id=%s AND company_id=%s AND idempotency_key=%s FOR UPDATE""",
+                    (reservation.tenant_id, reservation.company_id, reservation.idempotency_key),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return self._communication_reservation(row["body"]), False, "duplicate"
+                for name, recipient_id, window in windows:
+                    query = """SELECT COUNT(*) AS n FROM bb_communication_send_reservations
+                        WHERE tenant_id=%s AND company_id=%s AND reserved_at>=%s"""
+                    args = [reservation.tenant_id, reservation.company_id,
+                            reservation.reserved_at - window]
+                    if recipient_id is not None:
+                        query += " AND recipient_id=%s"
+                        args.append(recipient_id)
+                    cursor.execute(query, args)
+                    if cursor.fetchone()["n"] >= limits[name]:
+                        return reservation, False, f"{name} rate limit exceeded"
+                cursor.execute(
+                    """INSERT INTO bb_communication_send_reservations(
+                    reservation_id,tenant_id,company_id,recipient_id,purpose,
+                    idempotency_key,reserved_at,body) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (reservation.reservation_id, reservation.tenant_id, reservation.company_id,
+                     reservation.recipient_id, reservation.purpose.value,
+                     reservation.idempotency_key, reservation.reserved_at, encode(reservation)),
+                )
+                return reservation, True, "reserved"
+
+    def claim_communication_event(self, kind, event_id):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO bb_communication_events(kind,event_id) VALUES (%s,%s)
+                ON CONFLICT(kind,event_id) DO NOTHING RETURNING event_id""",
+                (kind, event_id),
+            )
+            return cursor.fetchone() is not None
+
 
 class PostgresVerificationRepository(VerificationRepository, _PostgresRepository):
     """Append-versioned PostgreSQL store for Verification-owned readiness evidence."""

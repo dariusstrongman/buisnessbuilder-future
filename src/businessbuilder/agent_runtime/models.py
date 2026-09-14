@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
 import json
+import re
 from typing import Any
 
 from businessbuilder.runtime.models import ArtifactRef, Money
@@ -101,6 +102,7 @@ class AgentJobEnvelope:
     created_at: datetime
     expires_at: datetime
     secret_refs: tuple[JobSecretRef, ...] = ()
+    communication_ref: str | None = None
 
     def __post_init__(self) -> None:
         required = (
@@ -131,6 +133,8 @@ class AgentJobEnvelope:
             raise ValueError("agent job budget currency mismatch")
         if self.reserved_budget.minor_units > self.maximum_job_spend.minor_units:
             raise ValueError("reserved budget exceeds maximum job spend")
+        if self.communication_ref and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,159}", self.communication_ref):
+            raise ValueError("communication_ref is not a safe opaque identifier")
 
     @property
     def envelope_digest(self) -> str:
@@ -175,6 +179,8 @@ class AgentJobEnvelope:
         }
         if self.secret_refs:
             payload["secret_refs"] = [item.to_contract() for item in self.secret_refs]
+        if self.communication_ref:
+            payload["communication_ref"] = self.communication_ref
         return payload
 
     def to_json(self) -> str:
@@ -221,6 +227,7 @@ class AgentJobEnvelope:
             created_at=datetime.fromisoformat(value["created_at"].replace("Z", "+00:00")),
             expires_at=datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00")),
             secret_refs=tuple(JobSecretRef(**item) for item in value.get("secret_refs", ())),
+            communication_ref=value.get("communication_ref"),
         )
 
 

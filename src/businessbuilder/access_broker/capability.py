@@ -34,6 +34,10 @@ class BrokeredAgentCapability(Capability):
         if not isinstance(refs, list) or len(refs) != 1:
             raise PermissionError("brokered provider action requires one opaque secret reference")
         JobSecretRef(**refs[0])
+        if self.broker.outbound_safety is not None and str(action).startswith("send_"):
+            communication_ref = request.inputs.get("communication_ref")
+            if not isinstance(communication_ref, str) or not communication_ref:
+                raise PermissionError("outbound communication requires policy authority")
 
     def estimate(self, request: CapabilityRequest) -> Money:
         del request

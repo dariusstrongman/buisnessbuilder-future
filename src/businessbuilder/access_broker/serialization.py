@@ -16,6 +16,9 @@ from .models import (
 
 
 def decode_broker_record(kind: str, data: dict):
+    if kind.startswith("communication_"):
+        from businessbuilder.outbound_communications.serialization import decode_communication_record
+        return decode_communication_record(kind, data)
     if kind == "external_account":
         data["status"] = ConnectionStatus(data["status"])
         return ExternalAccount(**data)

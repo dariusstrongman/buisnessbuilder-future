@@ -88,6 +88,7 @@ class SecretArtifactBroker:
         maximum_artifact_bytes: int = 25 * 1024 * 1024,
         maximum_signed_seconds: int = 300,
         connection_tokens=None,
+        outbound_safety=None,
     ) -> None:
         if maximum_artifact_bytes < 1 or maximum_signed_seconds not in range(1, 901):
             raise ValueError("broker limits are invalid")
@@ -101,6 +102,7 @@ class SecretArtifactBroker:
         self.maximum_artifact_bytes = maximum_artifact_bytes
         self.maximum_signed_seconds = maximum_signed_seconds
         self.connection_tokens = connection_tokens
+        self.outbound_safety = outbound_safety
 
     def register_external_account(self, account: ExternalAccount, *, actor_id: str) -> None:
         self.repository.save_broker_record(
@@ -287,6 +289,15 @@ class SecretArtifactBroker:
         crash_after_provider: bool = False,
     ) -> ProviderReceipt:
         self._authorize_envelope(envelope)
+        credential, connection = self._authorize_secret_record(envelope, secret_ref, operation)
+        communication_decision = None
+        if self.outbound_safety is not None and operation.startswith("send_"):
+            if not envelope.communication_ref:
+                raise BrokerDenied("outbound communication requires an opaque policy request")
+            communication_decision = self.outbound_safety.authorize(
+                envelope, communication_ref=envelope.communication_ref,
+                provider_connection_id=connection.connection_id, operation=operation,
+            )
         if self.connection_tokens is not None:
             self.connection_tokens.refresh_for_job(
                 envelope, secret_ref, operation=operation
@@ -307,11 +318,30 @@ class SecretArtifactBroker:
             stable_id("provider_request", action_key), action_key,
             ReceiptStatus.IN_PROGRESS, self.clock(), "pending", None, False,
             connection_id=connection.connection_id,
+            recipient_ref=communication_decision.recipient_id if communication_decision else None,
+            communication_purpose=(
+                self.outbound_safety._request(communication_decision).purpose.value
+                if communication_decision else None
+            ),
+            policy_decision_id=communication_decision.decision_id if communication_decision else None,
+            approval_reference=(
+                self.outbound_safety._request(communication_decision).approval_ref
+                if communication_decision else None
+            ),
+            suppression_result=communication_decision.suppression_result if communication_decision else None,
+            content_policy_result=communication_decision.content_result if communication_decision else None,
+            rate_limit_reservation_id=(
+                communication_decision.rate_limit_reservation_id if communication_decision else None
+            ),
+            delivery_status="queued" if communication_decision else None,
+            reconciliation_status="pending" if communication_decision else None,
         )
         claimed, execute = self.repository.claim_provider_receipt(receipt)
         if not execute:
             self._audit(envelope.tenant_id, envelope.company_id, "secret_artifact_broker", "broker.provider_action.suppressed", "provider_receipt", claimed.receipt_id, "durable idempotency state prevented duplicate action", {"job_id": envelope.job_id, "provider": claimed.provider, "operation": claimed.operation, "status": claimed.status.value, "attempts": claimed.attempts})
             if claimed.status is ReceiptStatus.SUCCEEDED:
+                if communication_decision:
+                    self.outbound_safety.record_provider_result(envelope, communication_decision, claimed)
                 return claimed
             raise ProviderActionSuppressed(claimed)
         self._audit(envelope.tenant_id, envelope.company_id, "secret_artifact_broker", "broker.provider_action.attempted", "provider_receipt", claimed.receipt_id, "bounded external action claimed", {"job_id": envelope.job_id, "provider": connection.provider, "operation": operation, "provider_request_id": claimed.provider_request_id, "attempt": claimed.attempts})
@@ -347,8 +377,12 @@ class SecretArtifactBroker:
             response_classification=result.response_classification[:120],
             external_object_ref=result.external_object_ref,
             retryable=result.retryable, completed_at=self.clock(),
+            delivery_status="accepted" if communication_decision and result.status is ReceiptStatus.SUCCEEDED else claimed.delivery_status,
+            reconciliation_status="provider_receipt" if communication_decision else claimed.reconciliation_status,
         )
         self.repository.complete_provider_receipt(completed)
+        if communication_decision:
+            self.outbound_safety.record_provider_result(envelope, communication_decision, completed)
         self._audit(envelope.tenant_id, envelope.company_id, "secret_artifact_broker", "broker.provider_receipt.recorded", "provider_receipt", completed.receipt_id, "non-sensitive provider receipt persisted", {"job_id": envelope.job_id, "provider": connection.provider, "operation": operation, "status": completed.status.value, "response_classification": completed.response_classification, "external_object_ref": completed.external_object_ref, "retryable": completed.retryable, "attempts": completed.attempts})
         return completed
 
@@ -378,6 +412,16 @@ class SecretArtifactBroker:
             retryable=result.retryable, completed_at=self.clock(),
         )
         self.repository.complete_provider_receipt(completed)
+        if self.outbound_safety is not None and envelope.communication_ref:
+            decision = self.repository.get_broker_record(
+                "communication_policy_decision", envelope.tenant_id, envelope.company_id,
+                stable_id("communication_decision", envelope.communication_ref, envelope.job_id),
+            )
+            if decision is not None:
+                completed = replace(completed, delivery_status="accepted",
+                                    reconciliation_status="provider_reconciled")
+                self.repository.complete_provider_receipt(completed)
+                self.outbound_safety.record_provider_result(envelope, decision, completed)
         self._audit(envelope.tenant_id, envelope.company_id, "secret_artifact_broker", "broker.provider_receipt.reconciled", "provider_receipt", completed.receipt_id, "provider result recovered without repeating action", {"job_id": envelope.job_id, "provider": provider_name, "operation": operation, "status": completed.status.value})
         return completed
 

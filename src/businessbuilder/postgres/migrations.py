@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 5
+MIGRATION_VERSION = 6
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -238,6 +238,25 @@ CREATE TABLE IF NOT EXISTS bb_provider_callback_events (
     event_id TEXT NOT NULL,
     claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY(provider, event_id)
+);
+CREATE TABLE IF NOT EXISTS bb_communication_send_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    company_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    reserved_at TIMESTAMPTZ NOT NULL,
+    body TEXT NOT NULL,
+    UNIQUE(tenant_id, company_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS bb_communication_send_rate_scope
+    ON bb_communication_send_reservations(tenant_id, company_id, purpose, recipient_id, reserved_at);
+CREATE TABLE IF NOT EXISTS bb_communication_events (
+    kind TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(kind, event_id)
 );
 
 CREATE TABLE IF NOT EXISTS bb_ai_workforce_records (

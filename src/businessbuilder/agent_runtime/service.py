@@ -150,6 +150,7 @@ class AgentRuntimeService:
         causation_id: str | None = None,
         input_artifact_refs: tuple[ArtifactRef, ...] = (),
         secret_refs: tuple[JobSecretRef, ...] = (),
+        communication_ref: str | None = None,
         context_flags: frozenset[str] = frozenset(),
         model_policy: ModelPolicy = ModelPolicy(quality_floor=70),
         expires_in: timedelta = timedelta(minutes=15),
@@ -238,6 +239,7 @@ class AgentRuntimeService:
                     "input_artifact_refs": [item.to_contract() for item in input_artifact_refs],
                     "secret_refs": [item.to_contract() for item in secret_refs],
                     "trigger_ref": trigger_ref,
+                    "communication_ref": communication_ref,
                 },
                 budget_ref=budget_ref,
                 per_job_ceiling=maximum_job_spend,
@@ -259,6 +261,7 @@ class AgentRuntimeService:
                     job, role_id, role.version, action, entitlement_refs, evaluation,
                     selection, model_policy, input_artifact_refs, trigger_class,
                     trigger_ref, actor_id, now, expires_in, reserved, secret_refs,
+                    communication_ref,
                 )
                 self.repository.save_agent_admission(
                     envelope,
@@ -382,7 +385,7 @@ class AgentRuntimeService:
         self, job, role_id, role_version, action, entitlement_refs, evaluation,
         selection, model_policy, input_artifact_refs, trigger_class, trigger_ref,
         actor_id, now, expires_in, reserved,
-        secret_refs,
+        secret_refs, communication_ref,
     ):
         return AgentJobEnvelope(
             job.tenant_id, job.company_id, job.job_id, job.correlation_id,
@@ -393,7 +396,7 @@ class AgentRuntimeService:
             input_artifact_refs, 1, job.retry_policy.max_attempts, job.idempotency_key,
             trigger_class, trigger_ref, actor_id, evaluation.evaluation_id,
             evaluation.definition_digest or "", now, now + expires_in,
-            secret_refs,
+            secret_refs, communication_ref,
         )
 
     def _audit_admission(self, job, actor_id, role_id, capability, entitlement_refs, evaluation, selection):

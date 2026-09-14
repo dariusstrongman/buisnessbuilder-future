@@ -174,6 +174,12 @@ class RuntimeRepository(ABC):
     @abstractmethod
     def claim_provider_callback(self, provider: str, event_id: str) -> bool: ...
 
+    @abstractmethod
+    def reserve_communication_send(self, reservation: Any, limits: dict[str, int]) -> tuple[Any, bool, str]: ...
+
+    @abstractmethod
+    def claim_communication_event(self, kind: str, event_id: str) -> bool: ...
+
 
 class SQLiteRuntimeRepository(RuntimeRepository):
     """SQLite adapter. Orchestration depends only on repository methods, not SQL."""
@@ -355,6 +361,25 @@ class SQLiteRuntimeRepository(RuntimeRepository):
                     event_id TEXT NOT NULL,
                     claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
                     PRIMARY KEY(provider, event_id)
+                );
+                CREATE TABLE IF NOT EXISTS communication_send_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    company_id TEXT NOT NULL,
+                    recipient_id TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    reserved_at TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    UNIQUE(tenant_id, company_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS communication_send_rate_scope
+                    ON communication_send_reservations(tenant_id, company_id, purpose, recipient_id, reserved_at);
+                CREATE TABLE IF NOT EXISTS communication_events (
+                    kind TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY(kind, event_id)
                 );
                 """
             )
@@ -894,5 +919,56 @@ class SQLiteRuntimeRepository(RuntimeRepository):
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO provider_callback_events(provider, event_id) VALUES (?, ?)",
                 (provider, event_id),
+            )
+            return cursor.rowcount == 1
+
+    @staticmethod
+    def _communication_reservation(body: str):
+        from businessbuilder.outbound_communications.serialization import decode_communication_record
+        return decode_communication_record("communication_rate_reservation", decode(body))
+
+    def reserve_communication_send(self, reservation, limits):
+        from datetime import timedelta
+        with self._lock, self.transaction():
+            row = self.connection.execute(
+                """SELECT body FROM communication_send_reservations
+                WHERE tenant_id=? AND company_id=? AND idempotency_key=?""",
+                (reservation.tenant_id, reservation.company_id, reservation.idempotency_key),
+            ).fetchone()
+            if row:
+                return self._communication_reservation(row["body"]), False, "duplicate"
+            windows = (
+                ("company_minute", None, timedelta(minutes=1)),
+                ("company_hour", None, timedelta(hours=1)),
+                ("company_day", None, timedelta(days=1)),
+                ("recipient_minute", reservation.recipient_id, timedelta(minutes=1)),
+                ("recipient_hour", reservation.recipient_id, timedelta(hours=1)),
+                ("recipient_day", reservation.recipient_id, timedelta(days=1)),
+                ("burst", reservation.recipient_id, timedelta(seconds=10)),
+            )
+            for name, recipient_id, window in windows:
+                sql = """SELECT COUNT(*) AS n FROM communication_send_reservations
+                    WHERE tenant_id=? AND company_id=? AND reserved_at>=?"""
+                args = [reservation.tenant_id, reservation.company_id,
+                        (reservation.reserved_at - window).isoformat()]
+                if recipient_id is not None:
+                    sql += " AND recipient_id=?"
+                    args.append(recipient_id)
+                count = self.connection.execute(sql, args).fetchone()["n"]
+                if count >= limits[name]:
+                    return reservation, False, f"{name} rate limit exceeded"
+            self.connection.execute(
+                "INSERT INTO communication_send_reservations VALUES (?,?,?,?,?,?,?,?)",
+                (reservation.reservation_id, reservation.tenant_id, reservation.company_id,
+                 reservation.recipient_id, reservation.purpose.value,
+                 reservation.idempotency_key, reservation.reserved_at.isoformat(), encode(reservation)),
+            )
+            return reservation, True, "reserved"
+
+    def claim_communication_event(self, kind, event_id):
+        with self._lock, self._write():
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO communication_events(kind,event_id) VALUES (?,?)",
+                (kind, event_id),
             )
             return cursor.rowcount == 1

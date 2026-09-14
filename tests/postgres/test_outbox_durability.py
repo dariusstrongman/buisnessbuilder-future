@@ -33,6 +33,7 @@ from businessbuilder.postgres import (
     PostgresRuntimeRepository,
 )
 from businessbuilder.runtime.audit import AuditLog
+from businessbuilder.postgres.migrations import MIGRATION_VERSION
 from businessbuilder.runtime.capabilities import CapabilityRegistry
 from businessbuilder.runtime.events import LocalEventBus
 from businessbuilder.runtime.fakes import FakeCapability
@@ -146,7 +147,7 @@ class PostgresOutboxDurabilityTests(unittest.TestCase):
         self.assertEqual((), reopened.list_outbox())
         with reopened.connection.cursor() as cursor:
             cursor.execute("SELECT version FROM bb_schema_migrations ORDER BY version")
-            self.assertEqual([5], [row["version"] for row in cursor])
+            self.assertEqual([MIGRATION_VERSION], [row["version"] for row in cursor])
         reopened.close()
 
         migrated_again = PostgresCommercialRepository(self.dsn, schema=self.schema)

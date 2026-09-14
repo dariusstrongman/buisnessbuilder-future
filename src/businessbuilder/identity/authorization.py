@@ -25,6 +25,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.ACCESS_ARTIFACTS,
             Permission.INTERACT_AI_WORKFORCE,
             Permission.MANAGE_PROVIDER_CONNECTIONS,
+            Permission.MANAGE_COMMUNICATIONS,
             Permission.REQUEST_SUPPORT,
         }
     ),
@@ -55,6 +56,7 @@ SUPPORT_NEVER_ALLOWED = frozenset(
         Permission.PERFORM_HANDOFF,
         Permission.INTERACT_AI_WORKFORCE,
         Permission.MANAGE_PROVIDER_CONNECTIONS,
+        Permission.MANAGE_COMMUNICATIONS,
     }
 )
 

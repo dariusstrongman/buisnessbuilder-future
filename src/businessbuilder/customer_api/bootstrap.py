@@ -42,6 +42,7 @@ def create_postgres_customer_api(
     dsn: str | None = None,
     schema: str | None = None,
     provider_connections=None,
+    outbound_communications=None,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
     if len(signing_key) < 32:
@@ -92,4 +93,5 @@ def create_postgres_customer_api(
         id_factory=random_id,
         clock=utc_now,
         provider_connections=provider_connections,
+        outbound_communications=outbound_communications,
     )

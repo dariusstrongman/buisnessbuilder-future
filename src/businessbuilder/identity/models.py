@@ -49,6 +49,7 @@ class Permission(StrEnum):
     ACCESS_ARTIFACTS = "artifacts.access"
     INTERACT_AI_WORKFORCE = "ai_workforce.interact"
     MANAGE_PROVIDER_CONNECTIONS = "provider_connections.manage"
+    MANAGE_COMMUNICATIONS = "communications.manage"
     REQUEST_SUPPORT = "support.request"
 
 

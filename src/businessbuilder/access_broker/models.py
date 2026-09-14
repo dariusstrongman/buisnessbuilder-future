@@ -291,6 +291,15 @@ class ProviderReceipt:
     attempts: int = 1
     completed_at: datetime | None = None
     connection_id: str | None = None
+    recipient_ref: str | None = None
+    communication_purpose: str | None = None
+    policy_decision_id: str | None = None
+    approval_reference: str | None = None
+    suppression_result: str | None = None
+    content_policy_result: str | None = None
+    rate_limit_reservation_id: str | None = None
+    delivery_status: str | None = None
+    reconciliation_status: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -303,6 +312,12 @@ class ProviderReceipt:
         _require_time(self.timestamp, "timestamp")
         if self.completed_at:
             _require_time(self.completed_at, "completed_at")
+        for value in (
+            self.recipient_ref, self.policy_decision_id, self.approval_reference,
+            self.rate_limit_reservation_id,
+        ):
+            if value:
+                _require_id(value, "provider receipt communication reference")
 
 
 @dataclass(frozen=True, slots=True)

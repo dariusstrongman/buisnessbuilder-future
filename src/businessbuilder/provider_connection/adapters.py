@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 
 from businessbuilder.access_broker.models import ProviderActionResult, ProviderConnection, ReceiptStatus
 from businessbuilder.access_broker.ports import EphemeralArtifact, EphemeralSecret, ExternalProviderPort
+from businessbuilder.outbound_communications.models import DeliveryStatus, VerifiedDeliveryEvent
 
 from .models import OAuthTokenMaterial, ProviderCallbackEvent, ProviderFailureClass, ProviderReality
 from .ports import OAuthProviderPort
@@ -137,10 +138,36 @@ class SandboxEmailProvider(OAuthProviderPort, ExternalProviderPort):
             safe_reason=str(data["reason"])[:120],
         )
 
+    def delivery_callback(self, *, event_id: str, provider_request_id: str,
+                          status: DeliveryStatus, classification: str = "sandbox_delivery") -> tuple[bytes, str]:
+        body = json.dumps({
+            "event_id": event_id,
+            "provider_request_id": provider_request_id,
+            "status": status.value,
+            "occurred_at": self.clock().isoformat().replace("+00:00", "Z"),
+            "response_classification": classification,
+        }, sort_keys=True, separators=(",", ":")).encode()
+        return body, self.sign_callback(body)
+
+    def verify_delivery_callback(self, *, body: bytes, signature: str) -> VerifiedDeliveryEvent:
+        expected = self.sign_callback(body)
+        if not signature or not hmac.compare_digest(expected, signature):
+            raise PermissionError("provider delivery callback signature is invalid")
+        data = json.loads(body)
+        allowed = {"event_id", "provider_request_id", "status", "occurred_at", "response_classification"}
+        if not isinstance(data, dict) or set(data) != allowed:
+            raise ValueError("provider delivery callback is malformed")
+        return VerifiedDeliveryEvent(
+            event_id=str(data["event_id"]), provider=self.provider,
+            provider_request_id=str(data["provider_request_id"]),
+            status=DeliveryStatus(str(data["status"])),
+            occurred_at=datetime.fromisoformat(str(data["occurred_at"]).replace("Z", "+00:00")),
+            response_classification=str(data["response_classification"])[:120],
+        )
+
     def reconcile_connection(self, connection, *, access_token: bytes) -> ProviderReality:
         value = self._tokens.get(access_token)
         if value is None or not value[2]:
             return ProviderReality(False, connection.provider_account_id, frozenset(),
                                    failure_class=ProviderFailureClass.RECONNECT_REQUIRED)
         return ProviderReality(True, value[0], value[1], (("environment", "sandbox"),))
-
