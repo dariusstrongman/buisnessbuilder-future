@@ -106,6 +106,7 @@ class ResidentialCleaningEvidenceReviewTests(unittest.TestCase):
             id_factory=self.ids,
             clock=lambda: self.now,
             auto_dispatch_outbox=False,
+            allow_test_admission=True,
         )
         self.artifact_store = InMemoryArtifactStore(clock=lambda: self.now)
         self.journey = ResidentialCleaningJourneyService(

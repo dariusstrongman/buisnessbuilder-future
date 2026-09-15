@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import wraps
+from hashlib import sha256
+import json
 from typing import Callable
 
-from businessbuilder.identity import AuthorizationContext, AuthorizationPolicy, Permission
+from businessbuilder.identity import AuthorizationContext, AuthorizationDenied, AuthorizationPolicy, Permission
 
 from .models import (
     Amount,
@@ -17,6 +19,7 @@ from .models import (
     CheckoutIntent,
     CheckoutStatus,
     CommercialQuote,
+    CommercialAdmissionRecord,
     CommercialEvent,
     EntitlementClass,
     EntitlementGrant,
@@ -32,6 +35,7 @@ from .models import (
     PaymentEligibility,
     QuoteStatus,
     TaxDisposition,
+    TaxReviewState,
     PaymentIntentRef,
     ProductCode,
     RefundKind,
@@ -47,6 +51,7 @@ from .ports import CommercialEventSink
 from .outbox import CommercialOutboxDispatcher
 from .repository import CommercialConflict, CommercialRepository
 from .pricing import FOUNDING_PRICES, OfferCode, PriceKind
+from .operator_authority import CommercialOperatorAuthority, CommercialOperatorPrincipal
 
 
 SUPPORTED_BILLING_EVENTS = frozenset(
@@ -66,8 +71,15 @@ SUPPORTED_BILLING_EVENTS = frozenset(
 def _transactional(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self.repository.transaction():
-            result = method(self, *args, **kwargs)
+        try:
+            with self.repository.transaction():
+                result = method(self, *args, **kwargs)
+        except AuthorizationDenied:
+            if method.__name__ in {"release_payment", "create_existing_business_quote"} and self.operator_authority:
+                self.operator_authority.record_durable_denial(
+                    operation=method.__name__, order_id=kwargs.get("order_id"),
+                )
+            raise
         if self.auto_dispatch_outbox:
             self.dispatch_pending_events()
         return result
@@ -90,6 +102,9 @@ class CommercialService:
         automation_restriction_delay: timedelta = timedelta(days=2),
         auto_dispatch_outbox: bool = True,
         outbox_dispatcher_id: str = "commercial-inline",
+        operator_authority: CommercialOperatorAuthority | None = None,
+        allow_test_admission: bool = False,
+        tax_authority_verifier: Callable[[TaxReviewState, TaxDisposition, str | None], bool] | None = None,
     ) -> None:
         self.repository = repository
         self.authorization = authorization
@@ -99,6 +114,9 @@ class CommercialService:
         self.grace_duration = grace_duration
         self.automation_restriction_delay = automation_restriction_delay
         self.auto_dispatch_outbox = auto_dispatch_outbox
+        self.operator_authority = operator_authority
+        self.allow_test_admission = allow_test_admission
+        self.tax_authority_verifier = tax_authority_verifier
         self.outbox = CommercialOutboxDispatcher(
             repository,
             events,
@@ -108,6 +126,48 @@ class CommercialService:
 
     def dispatch_pending_events(self, *, limit: int = 100) -> int:
         return self.outbox.dispatch_pending(limit=limit)
+
+    def _admission_digest(self, order: Order) -> str:
+        quote = self.repository.get_quote(order.tenant_id, order.company_id, order.quote_id) if order.quote_id else None
+        payload = {
+            "order_id": order.order_id, "user_id": order.user_id,
+            "tenant_id": order.tenant_id, "company_id": order.company_id,
+            "offer_code": order.offer_code,
+            "existing_audit_ref": order.existing_audit_ref,
+            "existing_recommendation_digest": order.existing_recommendation_digest,
+            "items": [(item.product_version_id, item.quantity,
+                       item.unit_amount.currency if item.unit_amount else None,
+                       item.unit_amount.minor_units if item.unit_amount else None) for item in order.items],
+            "total": (order.total.currency, order.total.minor_units) if order.total else None,
+            "quote": (quote.quote_id, quote.version, quote.recommendation_digest, quote.audit_ref,
+                      quote.upfront.minor_units, quote.monthly.minor_units,
+                      quote.approved_by, quote.approved_at.isoformat() if quote.approved_at else None,
+                      quote.expires_at.isoformat()) if quote else None,
+        }
+        return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def _require_current_admission(self, order: Order) -> CommercialAdmissionRecord:
+        if not order.admission_id:
+            raise CommercialConflict("commercial operator admission required")
+        admission = self.repository.get_admission(order.tenant_id, order.company_id, order.admission_id)
+        now = self.clock()
+        if (admission.order_id != order.order_id or admission.quote_id != order.quote_id
+            or admission.order_digest != self._admission_digest(order)
+            or admission.eligibility is not PaymentEligibility.PAY_NOW_ELIGIBLE
+            or admission.expires_at <= now or (admission.eligible_at and admission.eligible_at > now)):
+            raise CommercialConflict("commercial admission is stale or delayed")
+        if admission.test_only:
+            if not self.allow_test_admission:
+                raise CommercialConflict("test admission disabled")
+        else:
+            if self.operator_authority is None:
+                raise CommercialConflict("commercial operator authority unavailable")
+            grant = self.repository.get_operator_grant(order.tenant_id, order.company_id, admission.operator_grant_id)
+            if not grant.active_at(now) or admission.operator_user_id != grant.operator_user_id:
+                raise CommercialConflict("commercial operator appointment expired or revoked")
+        if admission.tax_review_state is TaxReviewState.TAX_REVIEW_REQUIRED:
+            raise CommercialConflict("tax review required")
+        return admission
 
     @_transactional
     def create_order(
@@ -207,6 +267,8 @@ class CommercialService:
                           run_version_id, run_version.package.display_name,
                           BillingMode.RECURRING, 1, Amount("USD", 29900)),
             ), now, now, offer_code=OfferCode.EXISTING_RUN.value,
+            existing_audit_ref=audit_ref,
+            existing_recommendation_digest=recommendation_digest,
         )
         self.repository.append_order(order)
         self._audit_order(order, context.actor_user_id, "order.audit_scope_recorded", "Existing Business Audit scope recorded")
@@ -217,10 +279,34 @@ class CommercialService:
         self, *, tenant_id: str, company_id: str, order_id: str,
         audit_ref: str, recommendation_digest: str, upfront_minor: int,
         expires_at: datetime,
+        operator_principal: CommercialOperatorPrincipal | None = None,
     ) -> CommercialQuote:
-        """Internal scoped quote preparation; an audit and digest are mandatory."""
+        """Scoped quote requires current appointed operator authority outside test mode."""
+        if self.operator_authority is not None:
+            operator = self.operator_authority.verify(
+                operator_principal, tenant_id=tenant_id, company_id=company_id,
+                action="quote.publish", order_id=order_id,
+            )
+            actor = operator.operator_user_id
+        elif self.allow_test_admission:
+            actor = "deterministic_test_operator"
+        else:
+            raise CommercialConflict("commercial operator authority required")
         order = self.repository.get_order(tenant_id, company_id, order_id)
-        if order.status is not OrderStatus.DRAFT or not audit_ref or len(recommendation_digest) != 64:
+        if order.quote_id:
+            existing = self.repository.get_quote(tenant_id, company_id, order.quote_id)
+            if (existing.status is QuoteStatus.PROPOSED
+                and existing.expires_at > self.clock()
+                and existing.audit_ref == audit_ref
+                and existing.recommendation_digest == recommendation_digest
+                and existing.upfront == Amount("USD", upfront_minor)
+                and existing.expires_at == expires_at):
+                return existing
+            raise CommercialConflict("quote retry changed the current scoped terms")
+        if (order.status is not OrderStatus.DRAFT or not audit_ref or len(recommendation_digest) != 64
+            or order.existing_audit_ref != audit_ref
+            or order.existing_recommendation_digest != recommendation_digest
+        ):
             raise CommercialConflict("a draft and digest-bound audit are required")
         if order.offer_code != OfferCode.EXISTING_RUN.value:
             raise CommercialConflict("quote requires the distinct existing-business package")
@@ -234,7 +320,10 @@ class CommercialService:
             self.clock(), expires_at,
         )
         self.repository.append_quote(quote)
-        self._audit_order(order, "commercial_operator", "quote.proposed", "Audit-backed onboarding quote proposed")
+        linked = replace(order, quote_id=quote.quote_id,
+                         version=order.version + 1, updated_at=self.clock())
+        self.repository.append_order(linked)
+        self._audit_order(linked, actor, "quote.proposed", "Audit-backed onboarding quote proposed")
         return quote
 
     @_transactional
@@ -244,7 +333,12 @@ class CommercialService:
             raise PermissionError("company scope required")
         quote = self.repository.get_quote(context.tenant_id, context.company_id, quote_id)
         order = self.repository.get_order(context.tenant_id, context.company_id, quote.order_id)
-        if order.user_id != context.actor_user_id or quote.status is not QuoteStatus.PROPOSED:
+        if (quote.status is QuoteStatus.APPROVED and quote.approved_by == context.actor_user_id
+            and quote.recommendation_digest == recommendation_digest
+            and order.quote_id == quote_id):
+            return quote
+        if (order.user_id != context.actor_user_id or order.quote_id != quote_id
+            or quote.status is not QuoteStatus.PROPOSED):
             raise CommercialConflict("quote is not approvable")
         if quote.expires_at <= self.clock() or quote.recommendation_digest != recommendation_digest:
             raise CommercialConflict("stale or mismatched quote")
@@ -289,12 +383,17 @@ class CommercialService:
             order.eligible_at is not None and order.eligible_at > self.clock()
         )):
             raise CommercialConflict("payment eligibility delay is active")
+        if order.offer_code is not None:
+            self._require_current_admission(order)
         if order.offer_code is not None and order.tax_disposition is TaxDisposition.MANUAL_REVIEW:
             raise CommercialConflict("tax treatment awaits authorized review")
         order = self._transition_order(order, OrderStatus.PENDING_PAYMENT, context.actor_user_id, "Checkout opened")
         checkout = CheckoutIntent(
             self.id_factory("checkout"), order.tenant_id, order.user_id, order.company_id,
             order.order_id, provider_ref, CheckoutStatus.OPEN, idempotency_key, self.clock(),
+            expected_customer_email_digest=sha256(
+                self.authorization.repository.get_user(order.user_id).email.strip().lower().encode()
+            ).hexdigest(),
         )
         self.repository.save_checkout(checkout)
         linked = replace(order, checkout_intent_id=checkout.checkout_intent_id, version=order.version + 1, updated_at=self.clock())
@@ -307,7 +406,9 @@ class CommercialService:
         eligibility: PaymentEligibility, eligible_at: datetime | None,
         tax_disposition: TaxDisposition, review_ref: str,
     ) -> Order:
-        """Internal supervised decision, not callable from the customer API."""
+        """Deterministic offline admission only; production rejects this path."""
+        if not self.allow_test_admission:
+            raise CommercialConflict("test payment admission disabled")
         if not review_ref or len(review_ref) > 160:
             raise CommercialConflict("supervised decision reference required")
         order = self.repository.get_order(tenant_id, company_id, order_id)
@@ -320,11 +421,92 @@ class CommercialService:
             raise CommercialConflict("future eligibility cannot be pay-now")
         if tax_disposition is TaxDisposition.MANUAL_REVIEW and eligibility is PaymentEligibility.PAY_NOW_ELIGIBLE:
             raise CommercialConflict("manual tax review cannot be pay-now")
+        admission = CommercialAdmissionRecord(
+            self.id_factory("admission"), tenant_id, company_id, order_id, order.quote_id,
+            "deterministic_test_operator", "deterministic_test_grant",
+            self._admission_digest(order), eligibility, eligible_at, tax_disposition,
+            TaxReviewState.TEST_MODE_UNDETERMINED if tax_disposition is TaxDisposition.TEST_MODE_UNDETERMINED
+            else TaxReviewState.TAX_APPROVED,
+            review_ref, review_ref, self.clock(), self.clock() + timedelta(hours=1), True,
+        )
+        self.repository.append_admission(admission)
         changed = replace(order, eligibility=eligibility, eligible_at=eligible_at,
-                          tax_disposition=tax_disposition, version=order.version + 1,
-                          updated_at=self.clock())
+                          tax_disposition=tax_disposition, admission_id=admission.admission_id,
+                          version=order.version + 1, updated_at=self.clock())
         self.repository.append_order(changed)
-        self._audit_order(changed, "commercial_operator", "order.eligibility_reviewed", review_ref)
+        self._audit_order(changed, "deterministic_test_operator", "order.eligibility_reviewed", review_ref)
+        return changed
+
+    @_transactional
+    def release_payment(
+        self, operator_principal: CommercialOperatorPrincipal, *, tenant_id: str,
+        company_id: str, order_id: str, eligibility: PaymentEligibility,
+        eligible_at: datetime | None, tax_disposition: TaxDisposition,
+        tax_review_state: TaxReviewState, decision_ref: str,
+        tax_review_ref: str | None, expires_at: datetime,
+    ) -> Order:
+        """Immutable, digest-bound release by an appointed non-founder operator."""
+        if self.operator_authority is None:
+            raise CommercialConflict("commercial operator authority required")
+        operator = self.operator_authority.verify(
+            operator_principal, tenant_id=tenant_id, company_id=company_id,
+            action="payment.release", order_id=order_id,
+        )
+        grant = self.repository.get_operator_grant(tenant_id, company_id, operator.grant_id)
+        now = self.clock()
+        if not decision_ref or len(decision_ref) > 160 or expires_at <= now or expires_at > grant.ends_at:
+            raise CommercialConflict("scoped release reference or expiry invalid")
+        if eligibility is PaymentEligibility.PAY_NOW_ELIGIBLE and eligible_at and eligible_at > now:
+            raise CommercialConflict("future eligibility requires payment delay")
+        if eligibility is PaymentEligibility.PAY_NOW_ELIGIBLE:
+            test_boundary = (self.allow_test_admission
+                             and tax_review_state is TaxReviewState.TEST_MODE_UNDETERMINED
+                             and tax_disposition is TaxDisposition.TEST_MODE_UNDETERMINED)
+            reviewed_boundary = (
+                tax_review_state in {TaxReviewState.TAX_APPROVED, TaxReviewState.PROVIDER_CALCULATED}
+                and tax_disposition not in {TaxDisposition.MANUAL_REVIEW, TaxDisposition.TEST_MODE_UNDETERMINED}
+                and bool(tax_review_ref)
+                and self.tax_authority_verifier is not None
+                and self.tax_authority_verifier(tax_review_state, tax_disposition, tax_review_ref)
+            )
+            if not (test_boundary or reviewed_boundary):
+                raise CommercialConflict("tax authority review or explicit test boundary required")
+        order = self.repository.get_order(tenant_id, company_id, order_id)
+        if order.status is not OrderStatus.DRAFT or not order.offer_code or order.total is None:
+            raise CommercialConflict("priced draft required")
+        if order.admission_id:
+            existing = self.repository.get_admission(tenant_id, company_id, order.admission_id)
+            if (existing.operator_user_id == operator.operator_user_id
+                and existing.operator_grant_id == operator.grant_id
+                and existing.decision_ref == decision_ref
+                and existing.eligibility is eligibility
+                and existing.eligible_at == eligible_at
+                and existing.tax_disposition is tax_disposition
+                and existing.tax_review_state is tax_review_state
+                and existing.tax_review_ref == tax_review_ref
+                and existing.expires_at == expires_at
+                and existing.order_digest == self._admission_digest(order)):
+                return order
+            raise CommercialConflict("commercial admission retry changed its scope or terms")
+        if order.offer_code == OfferCode.EXISTING_RUN.value:
+            if not order.quote_id:
+                raise CommercialConflict("founder-approved quote required")
+            quote = self.repository.get_quote(tenant_id, company_id, order.quote_id)
+            if quote.status is not QuoteStatus.APPROVED or quote.expires_at <= now:
+                raise CommercialConflict("founder-approved current quote required")
+        admission = CommercialAdmissionRecord(
+            self.id_factory("admission"), tenant_id, company_id, order_id,
+            order.quote_id, operator.operator_user_id, operator.grant_id,
+            self._admission_digest(order), eligibility, eligible_at,
+            tax_disposition, tax_review_state, decision_ref, tax_review_ref,
+            now, expires_at,
+        )
+        self.repository.append_admission(admission)
+        changed = replace(order, eligibility=eligibility, eligible_at=eligible_at,
+                          tax_disposition=tax_disposition, admission_id=admission.admission_id,
+                          version=order.version + 1, updated_at=now)
+        self.repository.append_order(changed)
+        self._audit_order(changed, operator.operator_user_id, "order.payment_released", decision_ref)
         return changed
 
     def handle_billing_event(self, event: NormalizedBillingEvent) -> bool:

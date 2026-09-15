@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 
 from businessbuilder.commercial import CommercialService, seed_default_catalog
 from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
+from businessbuilder.commercial.operator_authority import CommercialOperatorAuthority
 from businessbuilder.company_brain import CompanyBrainService
 from businessbuilder.integration import (
     CompanyBrainRuntimeAdapter,
@@ -62,6 +64,8 @@ def create_postgres_customer_api(
     payment_provider=None,
     checkout_success_url: str | None = None,
     checkout_cancel_url: str | None = None,
+    commercial_operator_provisioner_verifier=None,
+    commercial_tax_authority_verifier=None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -97,6 +101,14 @@ def create_postgres_customer_api(
         RuntimeCommercialEventSink(runtime.events),
         id_factory=random_id,
         clock=clock,
+        allow_test_admission=enable_residential_cleaning_test_checkout,
+        operator_authority=CommercialOperatorAuthority(
+            identity_repository, commercial_repository,
+            signing_key=sha256(b"commercial-operator-v1:" + signing_key).digest(),
+            clock=clock,
+            privileged_provisioner_verifier=commercial_operator_provisioner_verifier,
+        ),
+        tax_authority_verifier=commercial_tax_authority_verifier,
     )
     seed_default_catalog(commercial_repository, effective_at=clock())
     residential_cleaning = ResidentialCleaningJourneyService(
@@ -149,4 +161,5 @@ def create_postgres_customer_api(
                           if payment_provider is not None else None),
         checkout_success_url=checkout_success_url,
         checkout_cancel_url=checkout_cancel_url,
+        commercial_operator_authority=commercial.operator_authority,
     )

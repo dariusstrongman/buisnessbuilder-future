@@ -36,7 +36,7 @@ def test_signed_payment_restart_idempotency_and_tenant_scope():
     repo = PostgresCommercialRepository(dsn, schema=schema)
     seed_default_catalog(repo, effective_at=NOW)
     service = CommercialService(repo, identity.authorization, RecordingCommercialEventSink(),
-                                id_factory=ids, clock=lambda: NOW)
+                                id_factory=ids, clock=lambda: NOW, allow_test_admission=True)
     order = service.create_order(context, "product_version_build_business_v1", offer_code=OfferCode.BUSINESS)
     service.record_payment_readiness(
         tenant_id=context.tenant_id, company_id=company_id, order_id=order.order_id,
@@ -53,7 +53,9 @@ def test_signed_payment_restart_idempotency_and_tenant_scope():
                                 id_factory=ids, clock=lambda: NOW)
     adapter, _ = provider()
     ingress = StripeWebhookIngress(repo, service, adapter)
-    signature, raw = signed_event("checkout.session.completed", session_object(order))
+    signature, raw = signed_event(
+        "checkout.session.completed", session_object(order, customer_email="pg-checkout-founder@example.test")
+    )
     assert ingress.handle(signature, raw) == 2
     assert repo.get_current_entitlement_grants(context.tenant_id, company_id)
     assert not repo.get_current_entitlement_grants("tenant_wrong", company_id)

@@ -9,7 +9,8 @@ class SupervisedPaymentProvider(Protocol):
     """Only the provider can mint a checkout URL or authenticate a billing event."""
 
     def open_checkout(self, *, order: Order, idempotency_key: str,
-                      success_url: str, cancel_url: str) -> tuple[str, str | None]: ...
+                      success_url: str, cancel_url: str,
+                      customer_email: str) -> tuple[str, str | None]: ...
 
     def verify_webhook(self, signature: str, raw_body: bytes) -> dict: ...
 

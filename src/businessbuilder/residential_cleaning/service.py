@@ -16,6 +16,7 @@ from businessbuilder.commercial import (
 from businessbuilder.commercial.repository import CommercialNotFound, CommercialRepository
 from businessbuilder.commercial.pricing import OfferCode
 from businessbuilder.commercial.models import PaymentEligibility, TaxDisposition
+from businessbuilder.commercial.operator_authority import CommercialOperatorPrincipal
 from businessbuilder.company_brain import (
     Company,
     CompanyBrainService,
@@ -789,6 +790,95 @@ class ResidentialCleaningJourneyService:
         )
         return self._public_record(record)
 
+    def publish_existing_business_scope(
+        self, operator: CommercialOperatorPrincipal, *, tenant_id: str,
+        company_id: str, findings: list[dict[str, str]],
+        citation_ids: list[str],
+    ) -> dict[str, Any]:
+        """Operator-authored, cited assessment; never a founder assertion or charge."""
+        authority = self.commercial.operator_authority
+        if authority is None:
+            raise PermissionError("commercial operator authority unavailable")
+        verified = authority.verify(
+            operator, tenant_id=tenant_id, company_id=company_id,
+            action="existing_scope.publish",
+        )
+        scope = Scope(tenant_id, company_id)
+        intake = self._record(scope, "intake_residential_cleaning_v1")
+        if intake.data.get("starting_point") != "running":
+            raise PilotConflict("scoped audit only belongs to the existing-business path")
+        inventory = self._record(scope, "existing_business_audit_residential_cleaning_v1")
+        research = self._record(scope, "research_residential_cleaning_denton_v1")
+        available = {item["source_id"] for item in research.data["sources"]}
+        if not citation_ids or len(citation_ids) > 8 or not set(citation_ids) <= available:
+            raise ValueError("operator assessment requires known research citations")
+        founder_systems = {item["system"] for item in inventory.data["systems"]}
+        if not isinstance(findings, list) or not 1 <= len(findings) <= 12:
+            raise ValueError("one through twelve scoped findings required")
+        normalized = []
+        seen = set()
+        for raw in findings:
+            if not isinstance(raw, dict) or set(raw) != {"system", "decision", "reason"}:
+                raise ValueError("scoped finding is invalid")
+            system, decision, reason = raw["system"], raw["decision"], raw["reason"]
+            if (system not in founder_systems or system in seen
+                or decision not in {"keep", "improve", "replace", "add"}
+                or not isinstance(reason, str) or not 12 <= len(reason.strip()) <= 500):
+                raise ValueError("scoped finding must be bounded and inventory-backed")
+            seen.add(system)
+            normalized.append({"system": system, "decision": decision, "reason": reason.strip()})
+        packet = {
+            "vertical": "residential_cleaning", "state": "operator_scoped_pending_founder_quote_approval",
+            "inventory_record_id": inventory.record_id,
+            "inventory_digest": inventory.data["content_digest"],
+            "research_record_id": research.record_id,
+            "citation_ids": sorted(set(citation_ids)),
+            "findings": normalized,
+            "responsibility": "BUSINESS_BUILDER",
+            "scope_version": "existing_business_cleaning.v1",
+        }
+        owner = EntityRef("user", verified.operator_user_id)
+        provenance = (Provenance(
+            "appointed_operator_existing_scope", self._iso(self.clock()), owner,
+            source_ref=f"operator://existing-scope/{company_id}",
+        ),)
+        record = self._ensure_record(
+            scope, "existing_business_scope_residential_cleaning_v1",
+            RecordKind.STRATEGY, packet, KnowledgeClass.INFERENCE,
+            provenance, owner,
+        )
+        return self._public_record(record)
+
+    def create_existing_business_order(
+        self, principal: AuthenticatedPrincipal,
+    ) -> dict[str, Any]:
+        """Founder starts an unpriced order from a real operator-reviewed scope."""
+        verified = self._require_founder(principal)
+        scope = Scope(verified.tenant_id, verified.company_id or "")
+        workflow = self._record(scope, "pilot_residential_cleaning_v1")
+        approval = self.runtime_repository.get_approval(
+            scope.tenant_id, scope.company_id, workflow.data["approval_id"]
+        )
+        if approval is None or approval.state is not ApprovalState.GRANTED:
+            raise PilotConflict("initial Runtime scope approval required")
+        scoped = self._record(scope, "existing_business_scope_residential_cleaning_v1")
+        suffix = verified.company_id.removeprefix("company_cleaning_")
+        order_id = f"order_cleaning_existing_{suffix}"
+        digest = canonical_digest(dict(scoped.data)).removeprefix("sha256:")
+        try:
+            order = self.commercial_repository.get_order(scope.tenant_id, scope.company_id, order_id)
+        except CommercialNotFound:
+            order = self.commercial.create_existing_business_order(
+                AuthorizationContext(verified.user_id, scope.tenant_id, scope.company_id),
+                audit_ref=scoped.record_id, recommendation_digest=digest,
+                order_id=order_id,
+            )
+        if (order.user_id != verified.user_id or order.existing_audit_ref != scoped.record_id
+            or order.existing_recommendation_digest != digest):
+            raise PilotConflict("existing order does not match current operator scope")
+        return {"order_id": order.order_id, "status": order.status.value,
+                "quote_id": order.quote_id, "priced": order.total is not None}
+
     def transition_founder_action(
         self,
         principal: AuthenticatedPrincipal,
@@ -946,6 +1036,12 @@ class ResidentialCleaningJourneyService:
             )
         except NotFoundError:
             existing_audit = None
+        try:
+            existing_scope = self.company_brain.repository.get_record(
+                scope, "existing_business_scope_residential_cleaning_v1"
+            )
+        except NotFoundError:
+            existing_scope = None
         approval = self.runtime_repository.get_approval(
             scope.tenant_id, scope.company_id, workflow.data["approval_id"]
         )
@@ -960,6 +1056,13 @@ class ResidentialCleaningJourneyService:
         ]
         order = None
         order_id = workflow.data.get("order_id")
+        if order_id is None and intake.data.get("starting_point") == "running":
+            candidates = [item for item in self.commercial_repository.list_current_orders(
+                scope.tenant_id, scope.company_id
+            ) if item.offer_code == OfferCode.EXISTING_RUN.value]
+            if len(candidates) > 1:
+                raise PilotConflict("multiple existing-business orders require operator reconciliation")
+            order_id = candidates[0].order_id if candidates else None
         if isinstance(order_id, str):
             try:
                 current = self.commercial_repository.get_order(
@@ -973,6 +1076,13 @@ class ResidentialCleaningJourneyService:
                     "product_code": current.items[0].product_code.value,
                     "status": current.status.value,
                     "mode": workflow.data.get("commercial_mode"),
+                    "quote_id": current.quote_id,
+                    "quote_status": (
+                        self.commercial_repository.get_quote(scope.tenant_id, scope.company_id, current.quote_id).status.value
+                        if current.quote_id else None
+                    ),
+                    "payment_eligibility": current.eligibility.value,
+                    "admission_present": current.admission_id is not None,
                 }
         entitlements = [
             {
@@ -1006,6 +1116,7 @@ class ResidentialCleaningJourneyService:
             "research": self._public_record(research),
             "recommendation": self._public_record(proposed),
             "existing_business_audit": self._public_record(existing_audit) if existing_audit else None,
+            "existing_business_scope": self._public_record(existing_scope) if existing_scope else None,
             "scope_commit": {
                 "state": workflow.data["state"],
                 "job_id": workflow.data["job_id"],

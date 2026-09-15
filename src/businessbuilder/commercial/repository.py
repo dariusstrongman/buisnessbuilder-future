@@ -16,6 +16,8 @@ from .models import (
     CancellationRecord,
     CheckoutIntent,
     CommercialQuote,
+    CommercialAdmissionRecord,
+    CommercialOperatorGrant,
     CommercialEvent,
     EntitlementGrant,
     Order,
@@ -93,6 +95,18 @@ class CommercialRepository(ABC):
 
     @abstractmethod
     def get_quote(self, tenant_id: str, company_id: str, quote_id: str) -> CommercialQuote: ...
+
+    @abstractmethod
+    def append_operator_grant(self, grant: CommercialOperatorGrant) -> None: ...
+
+    @abstractmethod
+    def get_operator_grant(self, tenant_id: str, company_id: str, grant_id: str) -> CommercialOperatorGrant: ...
+
+    @abstractmethod
+    def append_admission(self, admission: CommercialAdmissionRecord) -> None: ...
+
+    @abstractmethod
+    def get_admission(self, tenant_id: str, company_id: str, admission_id: str) -> CommercialAdmissionRecord: ...
 
     @abstractmethod
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order: ...
@@ -183,6 +197,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.product_versions: dict[str, ProductVersion] = {}
         self.orders: dict[tuple[str, str, str], list[Order]] = {}
         self.quotes: dict[tuple[str, str, str], list[CommercialQuote]] = {}
+        self.operator_grants: dict[tuple[str, str, str], list[CommercialOperatorGrant]] = {}
+        self.admissions: dict[tuple[str, str, str], CommercialAdmissionRecord] = {}
         self.checkouts: dict[tuple[str, str, str], CheckoutIntent] = {}
         self.payments: dict[tuple[str, str, str], PaymentIntentRef] = {}
         self.refunds: list[RefundRecord] = []
@@ -199,6 +215,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         "product_versions",
         "orders",
         "quotes",
+        "operator_grants",
+        "admissions",
         "checkouts",
         "payments",
         "refunds",
@@ -412,6 +430,32 @@ class InMemoryCommercialRepository(CommercialRepository):
             raise CommercialNotFound("quote not found in scope")
         return history[-1]
 
+    def append_operator_grant(self, grant: CommercialOperatorGrant) -> None:
+        with self.lock:
+            history = self.operator_grants.setdefault((grant.tenant_id, grant.company_id, grant.grant_id), [])
+            if grant.version != (history[-1].version + 1 if history else 1):
+                raise CommercialConflict("operator grant versions must be contiguous")
+            history.append(grant)
+
+    def get_operator_grant(self, tenant_id: str, company_id: str, grant_id: str) -> CommercialOperatorGrant:
+        history = self.operator_grants.get((tenant_id, company_id, grant_id))
+        if not history:
+            raise CommercialNotFound("operator grant not found in scope")
+        return history[-1]
+
+    def append_admission(self, admission: CommercialAdmissionRecord) -> None:
+        with self.lock:
+            key = (admission.tenant_id, admission.company_id, admission.admission_id)
+            if key in self.admissions:
+                raise CommercialConflict("admission records are immutable")
+            self.admissions[key] = admission
+
+    def get_admission(self, tenant_id: str, company_id: str, admission_id: str) -> CommercialAdmissionRecord:
+        admission = self.admissions.get((tenant_id, company_id, admission_id))
+        if admission is None:
+            raise CommercialNotFound("admission not found in scope")
+        return admission
+
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order:
         history = self.orders.get((tenant_id, company_id, order_id))
         if not history:
@@ -562,7 +606,7 @@ from .models import (
     Amount, BillingMode, BillingPeriod, CancellationPolicy, CancellationTiming,
     CheckoutStatus, Entitlement, EntitlementClass, EntitlementStatus, Feature,
     GracePeriod, OrderItem, OrderStatus, Package, ProductCode, RefundKind,
-    PaymentEligibility, TaxDisposition, QuoteStatus,
+    PaymentEligibility, TaxDisposition, TaxReviewState, QuoteStatus,
     RenewalState, SubscriptionPlanRef, SubscriptionStatus,
 )
 
@@ -570,13 +614,14 @@ _COMMERCIAL_TYPES = {
     item.__name__: item
     for item in (
         Product, ProductVersion, Feature, Entitlement, Package, Order, OrderItem, CommercialQuote,
+        CommercialOperatorGrant, CommercialAdmissionRecord,
         CheckoutIntent, PaymentIntentRef, RefundRecord, CancellationRecord,
         Subscription, SubscriptionPlanRef, EntitlementGrant, OrderAuditEvent,
         SubscriptionAuditEvent, Amount, BillingPeriod, GracePeriod,
         CancellationPolicy, ProductCode, BillingMode, EntitlementClass,
         EntitlementStatus, OrderStatus, CheckoutStatus, SubscriptionStatus,
         RenewalState, RefundKind, CancellationTiming, CommercialEvent,
-        OutboxMessage, OutboxStatus, PaymentEligibility, TaxDisposition, QuoteStatus,
+        OutboxMessage, OutboxStatus, PaymentEligibility, TaxDisposition, TaxReviewState, QuoteStatus,
     )
 }
 
@@ -670,6 +715,8 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
             elif kind == "product_version": self.product_versions[key] = value
             elif kind == "order": self.orders.setdefault((value.tenant_id, value.company_id, value.order_id), []).append(value)
             elif kind == "quote": self.quotes.setdefault((value.tenant_id, value.company_id, value.quote_id), []).append(value)
+            elif kind == "operator_grant": self.operator_grants.setdefault((value.tenant_id, value.company_id, value.grant_id), []).append(value)
+            elif kind == "admission": self.admissions[(value.tenant_id, value.company_id, value.admission_id)] = value
             elif kind == "checkout": self.checkouts[(value.tenant_id, value.company_id, value.checkout_intent_id)] = value
             elif kind == "payment": self.payments[(value.tenant_id, value.company_id, value.payment_ref_id)] = value
             elif kind == "refund": self.refunds.append(value)
@@ -765,6 +812,14 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
     def append_quote(self, quote: CommercialQuote) -> None:
         super().append_quote(quote)
         self._insert("quote", self._scope(quote.tenant_id, quote.company_id, quote.quote_id), quote.version, quote, quote.tenant_id, quote.company_id)
+
+    def append_operator_grant(self, grant: CommercialOperatorGrant) -> None:
+        super().append_operator_grant(grant)
+        self._insert("operator_grant", self._scope(grant.tenant_id, grant.company_id, grant.grant_id), grant.version, grant, grant.tenant_id, grant.company_id)
+
+    def append_admission(self, admission: CommercialAdmissionRecord) -> None:
+        super().append_admission(admission)
+        self._insert("admission", self._scope(admission.tenant_id, admission.company_id, admission.admission_id), 1, admission, admission.tenant_id, admission.company_id)
 
     def save_checkout(self, checkout: CheckoutIntent) -> None:
         super().save_checkout(checkout)

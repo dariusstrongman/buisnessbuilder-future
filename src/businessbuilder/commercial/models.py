@@ -71,6 +71,14 @@ class TaxDisposition(StrEnum):
     NON_TAXABLE = "non_taxable"
     PROVIDER_CALCULATED = "provider_calculated"
     MANUAL_REVIEW = "manual_review"
+    TEST_MODE_UNDETERMINED = "test_mode_undetermined"
+
+
+class TaxReviewState(StrEnum):
+    TAX_REVIEW_REQUIRED = "TAX_REVIEW_REQUIRED"
+    TAX_APPROVED = "TAX_APPROVED"
+    PROVIDER_CALCULATED = "PROVIDER_CALCULATED"
+    TEST_MODE_UNDETERMINED = "TEST_MODE_UNDETERMINED"
 
 
 class QuoteStatus(StrEnum):
@@ -193,6 +201,9 @@ class Order:
     eligibility: PaymentEligibility = PaymentEligibility.PAYMENT_DELAY_REQUIRED
     eligible_at: datetime | None = None
     tax_disposition: TaxDisposition = TaxDisposition.MANUAL_REVIEW
+    admission_id: str | None = None
+    existing_audit_ref: str | None = None
+    existing_recommendation_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +225,45 @@ class CommercialQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class CommercialOperatorGrant:
+    grant_id: str
+    tenant_id: str
+    company_id: str
+    operator_user_id: str
+    provisioned_by: str
+    actions: frozenset[str]
+    starts_at: datetime
+    ends_at: datetime
+    reason_code: str
+    revoked_at: datetime | None = None
+    version: int = 1
+
+    def active_at(self, at: datetime) -> bool:
+        return self.revoked_at is None and self.starts_at <= at < self.ends_at
+
+
+@dataclass(frozen=True, slots=True)
+class CommercialAdmissionRecord:
+    admission_id: str
+    tenant_id: str
+    company_id: str
+    order_id: str
+    quote_id: str | None
+    operator_user_id: str
+    operator_grant_id: str
+    order_digest: str
+    eligibility: PaymentEligibility
+    eligible_at: datetime | None
+    tax_disposition: TaxDisposition
+    tax_review_state: TaxReviewState
+    decision_ref: str
+    tax_review_ref: str | None
+    created_at: datetime
+    expires_at: datetime
+    test_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CheckoutIntent:
     checkout_intent_id: str
     tenant_id: str
@@ -226,6 +276,7 @@ class CheckoutIntent:
     created_at: datetime
     expires_at: datetime | None = None
     redirect_url: str | None = None
+    expected_customer_email_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

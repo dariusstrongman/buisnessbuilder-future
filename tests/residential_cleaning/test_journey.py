@@ -123,6 +123,7 @@ class ResidentialCleaningJourneyTests(unittest.TestCase):
             id_factory=self.ids,
             clock=lambda: self.now,
             auto_dispatch_outbox=False,
+            allow_test_admission=True,
         )
         self.journey = ResidentialCleaningJourneyService(
             identity_repository=self.identity_repository,

@@ -27,6 +27,8 @@ from businessbuilder.commercial.models import (
     CancellationRecord,
     CheckoutIntent,
     CommercialQuote,
+    CommercialOperatorGrant,
+    CommercialAdmissionRecord,
     CommercialEvent,
     EntitlementGrant,
     Order,
@@ -312,6 +314,12 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     self.quotes.setdefault(
                         (value.tenant_id, value.company_id, value.quote_id), []
                     ).append(value)
+                elif kind == "operator_grant":
+                    self.operator_grants.setdefault(
+                        (value.tenant_id, value.company_id, value.grant_id), []
+                    ).append(value)
+                elif kind == "admission":
+                    self.admissions[(value.tenant_id, value.company_id, value.admission_id)] = value
                 elif kind == "checkout":
                     self.checkouts[
                         (value.tenant_id, value.company_id, value.checkout_intent_id)
@@ -413,6 +421,20 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
             quote,
             quote.tenant_id,
             quote.company_id,
+        )
+
+    def append_operator_grant(self, grant: CommercialOperatorGrant) -> None:
+        super().append_operator_grant(grant)
+        self._insert(
+            "operator_grant", self._scope(grant.tenant_id, grant.company_id, grant.grant_id),
+            grant.version, grant, grant.tenant_id, grant.company_id,
+        )
+
+    def append_admission(self, admission: CommercialAdmissionRecord) -> None:
+        super().append_admission(admission)
+        self._insert(
+            "admission", self._scope(admission.tenant_id, admission.company_id, admission.admission_id),
+            1, admission, admission.tenant_id, admission.company_id,
         )
 
     def save_checkout(self, checkout: CheckoutIntent) -> None:

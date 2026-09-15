@@ -11,7 +11,10 @@ from typing import Any, Callable, Mapping
 from businessbuilder.build_room.projection import ScopedEnvelope, project_build_room
 from businessbuilder.commercial import Amount, CommercialService
 from businessbuilder.commercial.models import CheckoutStatus, OrderStatus
+from businessbuilder.commercial.models import PaymentEligibility, TaxDisposition, TaxReviewState
+from businessbuilder.commercial.operator_authority import CommercialOperatorAuthority
 from businessbuilder.commercial.pricing import OfferCode, public_pricing
+from businessbuilder.residential_cleaning.capability import canonical_digest
 from businessbuilder.commercial.repository import CommercialConflict
 from businessbuilder.commercial.repository import CommercialRepository
 from businessbuilder.company_brain import (
@@ -52,6 +55,20 @@ _APPROVAL_ROUTE = re.compile(
 _ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
 _ORDER_CHECKOUT_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/checkout$")
 _ORDER_OFFER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/offer$")
+_OPERATOR_RELEASE_ROUTE = re.compile(
+    r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/orders/([A-Za-z0-9_-]{1,128})/release$"
+)
+_OPERATOR_SCOPE_ROUTE = re.compile(
+    r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning/existing-scope$"
+)
+_OPERATOR_QUOTE_ROUTE = re.compile(
+    r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/orders/([A-Za-z0-9_-]{1,128})/quote$"
+)
+_EXISTING_ORDER_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/existing-order$"
+)
+_ORDER_QUOTE_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/quote$")
+_ORDER_QUOTE_APPROVE_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/quote/approve$")
 _STRIPE_WEBHOOK_ROUTE = "/api/v1/payment-webhooks/stripe"
 _EXISTING_AUDIT_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/existing-business-audit$"
@@ -173,6 +190,7 @@ class CustomerApi:
         payment_webhooks=None,
         checkout_success_url: str | None = None,
         checkout_cancel_url: str | None = None,
+        commercial_operator_authority: CommercialOperatorAuthority | None = None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -196,6 +214,7 @@ class CustomerApi:
         self.payment_webhooks = payment_webhooks
         self.checkout_success_url = checkout_success_url
         self.checkout_cancel_url = checkout_cancel_url
+        self.commercial_operator_authority = commercial_operator_authority
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -369,7 +388,107 @@ class CustomerApi:
                 {"status": "error", "error": "commercial_conflict", "message": "commercial state conflicts with this request"},
             )
 
+    def _appointed_commercial_operator(self, token, user_id, company_id, grant_id):
+        if self.commercial_operator_authority is None:
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator authority unavailable")
+        candidates = []
+        for membership in self.identity_repository.list_user_memberships(user_id):
+            if membership.status is MembershipStatus.ACTIVE and membership.role is Role.SUPPORT:
+                organization = self.identity_repository.get_organization_by_tenant(membership.tenant_id)
+                if company_id in organization.company_ids:
+                    candidates.append(membership.tenant_id)
+        if len(candidates) != 1:
+            self.commercial_operator_authority.record_durable_denial(
+                operation="company_scope", order_id=None,
+            )
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator company scope unavailable")
+        try:
+            principal = self.commercial_operator_authority.issue(
+                token, tenant_id=candidates[0], company_id=company_id,
+                grant_id=self._identifier(grant_id, "grant_id"),
+            )
+        except (AuthorizationDenied, LookupError):
+            self.commercial_operator_authority.record_durable_denial(
+                operation="grant_or_session", order_id=None,
+            )
+            raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator appointment unavailable") from None
+        return candidates[0], principal
+
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        operator_scope = _OPERATOR_SCOPE_ROUTE.fullmatch(path)
+        if operator_scope:
+            self._method(method, "POST")
+            if self.residential_cleaning is None or self.commercial_operator_authority is None or support:
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator action unavailable")
+            company_id = operator_scope.group(1)
+            values = self._object(
+                body, required={"grant_id", "findings", "citation_ids"},
+                allowed={"grant_id", "findings", "citation_ids"},
+            )
+            tenant_id, appointed = self._appointed_commercial_operator(
+                token, user.user_id, company_id, values["grant_id"]
+            )
+            scoped = self.residential_cleaning.publish_existing_business_scope(
+                appointed, tenant_id=tenant_id, company_id=company_id,
+                findings=values["findings"], citation_ids=values["citation_ids"],
+            )
+            return ApiResponse(HTTPStatus.CREATED, {"scoped_recommendation": scoped})
+        operator_quote = _OPERATOR_QUOTE_ROUTE.fullmatch(path)
+        if operator_quote:
+            self._method(method, "POST")
+            if self.commercial_operator_authority is None or support:
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator action unavailable")
+            company_id, order_id = operator_quote.groups()
+            values = self._object(
+                body, required={"grant_id", "upfront_minor", "expires_at"},
+                allowed={"grant_id", "upfront_minor", "expires_at"},
+            )
+            tenant_id, appointed = self._appointed_commercial_operator(
+                token, user.user_id, company_id, values["grant_id"]
+            )
+            order = self.commercial_repository.get_order(tenant_id, company_id, order_id)
+            if type(values["upfront_minor"]) is not int:
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "quote amount invalid")
+            expires = self._parse_time(values["expires_at"])
+            if expires is None or expires > self.clock() + timedelta(days=7):
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "quote expiry invalid")
+            quote = self.commercial.create_existing_business_quote(
+                tenant_id=tenant_id, company_id=company_id, order_id=order_id,
+                audit_ref=order.existing_audit_ref or "",
+                recommendation_digest=order.existing_recommendation_digest or "",
+                upfront_minor=values["upfront_minor"], expires_at=expires,
+                operator_principal=appointed,
+            )
+            return ApiResponse(HTTPStatus.CREATED, {"quote": self._commercial_quote(quote)})
+        operator_release = _OPERATOR_RELEASE_ROUTE.fullmatch(path)
+        if operator_release:
+            self._method(method, "POST")
+            if self.commercial_operator_authority is None or support:
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator action unavailable")
+            company_id, order_id = operator_release.groups()
+            values = self._object(
+                body,
+                required={"grant_id", "eligibility", "tax_disposition", "tax_review_state",
+                          "decision_ref", "expires_at"},
+                allowed={"grant_id", "eligibility", "eligible_at", "tax_disposition",
+                         "tax_review_state", "decision_ref", "tax_review_ref", "expires_at"},
+            )
+            tenant_id, principal = self._appointed_commercial_operator(
+                token, user.user_id, company_id, values["grant_id"],
+            )
+            changed = self.commercial.release_payment(
+                principal, tenant_id=tenant_id, company_id=company_id,
+                order_id=order_id,
+                eligibility=PaymentEligibility(values["eligibility"]),
+                eligible_at=self._parse_time(values.get("eligible_at")),
+                tax_disposition=TaxDisposition(values["tax_disposition"]),
+                tax_review_state=TaxReviewState(values["tax_review_state"]),
+                decision_ref=self._identifier(values["decision_ref"], "decision_ref"),
+                tax_review_ref=(self._identifier(values["tax_review_ref"], "tax_review_ref")
+                                if values.get("tax_review_ref") else None),
+                expires_at=self._parse_time(values["expires_at"]),
+            )
+            return ApiResponse(HTTPStatus.OK, {"order": self._order(changed)})
         pilot_grant = _PILOT_SUPPORT_GRANT_ROUTE.fullmatch(path)
         if pilot_grant:
             self._method(method, "POST")
@@ -1161,6 +1280,67 @@ class CustomerApi:
             )
             return ApiResponse(HTTPStatus.OK, {"approval": self._approval(decided), "job_status": job.status.value})
 
+        existing_order = _EXISTING_ORDER_ROUTE.fullmatch(path)
+        if existing_order:
+            self._method(method, "POST")
+            self._object(body, required=set(), allowed=set())
+            company_id = existing_order.group(1)
+            principal = self._company_principal(
+                token, user.user_id, company_id, support, Permission.AUTHORIZE_SPEND,
+                request_id, correlation_id,
+            )
+            if self.residential_cleaning is None or principal.role is not Role.OWNER or support:
+                self._deny(principal, Permission.AUTHORIZE_SPEND, "founder scope required", request_id, correlation_id)
+            result = self.residential_cleaning.create_existing_business_order(principal)
+            return ApiResponse(HTTPStatus.CREATED, {"order": result})
+
+        quote_approve = _ORDER_QUOTE_APPROVE_ROUTE.fullmatch(path)
+        if quote_approve:
+            self._method(method, "POST")
+            values = self._object(
+                body, required={"quote_id", "recommendation_digest"},
+                allowed={"quote_id", "recommendation_digest"},
+            )
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.AUTHORIZE_SPEND,
+                request_id, correlation_id,
+            )
+            order = self.commercial_repository.get_order(
+                principal.tenant_id, principal.company_id or "", quote_approve.group(1)
+            )
+            if (order.user_id != principal.user_id or order.offer_code != OfferCode.EXISTING_RUN.value
+                or not order.quote_id or order.quote_id != values["quote_id"] or support):
+                self._deny(principal, Permission.AUTHORIZE_SPEND, "quote scope invalid", request_id, correlation_id)
+            digest = self._short_string(values["recommendation_digest"], 64)
+            scope = Scope(principal.tenant_id, principal.company_id or "")
+            scoped = self.company_brain.repository.get_record(
+                scope, "existing_business_scope_residential_cleaning_v1"
+            )
+            if canonical_digest(dict(scoped.data)).removeprefix("sha256:") != digest:
+                raise CommercialConflict("operator recommendation changed before founder quote approval")
+            quote = self.commercial.approve_quote(self._context(principal), order.quote_id, digest)
+            current = self.commercial_repository.get_order(
+                principal.tenant_id, principal.company_id or "", order.order_id
+            )
+            return ApiResponse(HTTPStatus.OK, {"quote": self._commercial_quote(quote), "order": self._order(current)})
+
+        order_quote = _ORDER_QUOTE_ROUTE.fullmatch(path)
+        if order_quote:
+            self._method(method, "GET")
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.VIEW_BILLING,
+                request_id, correlation_id,
+            )
+            order = self.commercial_repository.get_order(
+                principal.tenant_id, principal.company_id or "", order_quote.group(1)
+            )
+            if order.user_id != principal.user_id or not order.quote_id:
+                self._deny(principal, Permission.VIEW_BILLING, "quote owner mismatch", request_id, correlation_id)
+            quote = self.commercial_repository.get_quote(
+                principal.tenant_id, principal.company_id or "", order.quote_id
+            )
+            return ApiResponse(HTTPStatus.OK, {"quote": self._commercial_quote(quote)})
+
         if path == "/api/v1/orders":
             if method == "POST":
                 values = self._object(body, required={"company_id", "product_version_id"}, allowed={"company_id", "product_version_id"})
@@ -1250,6 +1430,7 @@ class CustomerApi:
                     idempotency_key=f"bb:{order.order_id}:{key}",
                     success_url=self.checkout_success_url,
                     cancel_url=self.checkout_cancel_url,
+                    customer_email=user.email,
                 )
                 with self.commercial_repository.transaction():
                     checkout = replace(checkout, provider_ref=provider_ref, redirect_url=redirect_url)
@@ -1305,6 +1486,12 @@ class CustomerApi:
             return ("GET", "POST")
         if _ORDER_OFFER_ROUTE.fullmatch(path):
             return ("POST",)
+        if (_OPERATOR_RELEASE_ROUTE.fullmatch(path) or _OPERATOR_QUOTE_ROUTE.fullmatch(path)
+            or _OPERATOR_SCOPE_ROUTE.fullmatch(path) or _EXISTING_ORDER_ROUTE.fullmatch(path)
+            or _ORDER_QUOTE_APPROVE_ROUTE.fullmatch(path)):
+            return ("POST",)
+        if _ORDER_QUOTE_ROUTE.fullmatch(path):
+            return ("GET",)
         if _EXISTING_AUDIT_ROUTE.fullmatch(path):
             return ("GET", "POST")
         if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
@@ -1660,6 +1847,19 @@ class CustomerApi:
         }
 
     @staticmethod
+    def _commercial_quote(quote):
+        return {
+            "quote_id": quote.quote_id,
+            "order_id": quote.order_id,
+            "status": quote.status.value,
+            "upfront": CustomerApi._amount(quote.upfront),
+            "monthly": CustomerApi._amount(quote.monthly),
+            "recommendation_digest": quote.recommendation_digest,
+            "expires_at": CustomerApi._time(quote.expires_at),
+            "approved_at": CustomerApi._time(quote.approved_at),
+        }
+
+    @staticmethod
     def _subscription(item):
         return {
             "subscription_id": item.subscription_id,
@@ -1968,3 +2168,14 @@ class CustomerApi:
         if value is None:
             return None
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _parse_time(value):
+        if value is None:
+            return None
+        if not isinstance(value, str) or len(value) > 40:
+            raise ValueError("time must be a short ISO-8601 string")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timezone required")
+        return parsed.astimezone(timezone.utc)

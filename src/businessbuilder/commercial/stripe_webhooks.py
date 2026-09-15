@@ -7,6 +7,7 @@ from hashlib import sha256
 
 from .models import Amount, BillingPeriod, NormalizedBillingEvent, SubscriptionStatus
 from .repository import CommercialConflict, CommercialRepository
+from .pricing import FOUNDING_PRICES, OfferCode
 from .service import CommercialService
 from .stripe_test import StripeTestPaymentProvider
 
@@ -36,8 +37,12 @@ class StripeWebhookIngress:
             "checkout.session.async_payment_failed", "checkout.session.expired",
         }:
             return self._session(event_type, value, event_ref, occurred_at)
-        if event_type in {"customer.subscription.updated", "customer.subscription.deleted", "invoice.payment_failed", "invoice.paid"}:
+        if event_type in {"customer.subscription.updated", "customer.subscription.deleted", "invoice.payment_failed", "invoice.payment_succeeded"}:
             return self._subscription(event_type, value, event_ref, occurred_at)
+        if event_type == "invoice.paid":
+            # Stripe also emits this for an invoice marked paid outside Stripe.
+            # It cannot by itself attest to a provider-processed renewal.
+            return 0
         if event_type == "refund.created":
             return self._refund(value, event_ref, occurred_at)
         return 0  # Unknown events cannot mutate Commercial.
@@ -81,6 +86,13 @@ class StripeWebhookIngress:
                 ref=ref, stage="checkout", event_type="billing.checkout.completed", order=order,
                 occurred_at=occurred_at, checkout_intent_id=checkout.checkout_intent_id,
             )))
+        details = value.get("customer_details")
+        email = details.get("email") if isinstance(details, dict) else None
+        metadata = value.get("metadata")
+        if (not checkout.expected_customer_email_digest or not isinstance(email, str)
+            or sha256(email.strip().lower().encode()).hexdigest() != checkout.expected_customer_email_digest
+            or not isinstance(metadata, dict) or metadata.get("bb_order_id") != order.order_id):
+            raise CommercialConflict("Stripe customer or session metadata does not match the founder order")
         currency = value.get("currency")
         subtotal = value.get("amount_subtotal")
         total = value.get("amount_total")
@@ -136,7 +148,12 @@ class StripeWebhookIngress:
                 subscription_provider_ref=subscription_ref,
             )
         else:
-            if event_type == "invoice.paid":
+            if event_type == "invoice.payment_succeeded":
+                if value.get("billing_reason") != "subscription_cycle":
+                    return 0  # Checkout already reconciles the initial invoice.
+                monthly = FOUNDING_PRICES[OfferCode(order.offer_code)].monthly_minor
+                if value.get("currency") != "usd" or value.get("amount_paid") != monthly:
+                    raise CommercialConflict("renewal amount or currency does not match founding plan")
                 status = SubscriptionStatus.ACTIVE
             elif value.get("cancel_at_period_end"):
                 status = SubscriptionStatus.CANCEL_AT_PERIOD_END

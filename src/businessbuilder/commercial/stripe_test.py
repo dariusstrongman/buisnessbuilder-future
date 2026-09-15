@@ -61,16 +61,20 @@ class StripeTestPaymentProvider:
         return value
 
     def open_checkout(self, *, order: Order, idempotency_key: str,
-                      success_url: str, cancel_url: str) -> tuple[str, str]:
+                      success_url: str, cancel_url: str,
+                      customer_email: str) -> tuple[str, str]:
         if order.tax_disposition is TaxDisposition.MANUAL_REVIEW:
             raise ValueError("tax disposition still requires review")
         if order.tax_disposition is TaxDisposition.TAXABLE:
             raise ValueError("taxable classification requires configured tax calculation")
         if not order.items or any(item.unit_amount is None for item in order.items):
             raise ValueError("canonical item price required")
+        if not isinstance(customer_email, str) or not re.fullmatch(r"[^\s@]{1,64}@[^\s@]{1,190}", customer_email):
+            raise ValueError("verified founder email required")
         mode = "subscription" if any(item.billing_mode is BillingMode.RECURRING for item in order.items) else "payment"
         fields: list[tuple[str, str]] = [
             ("mode", mode), ("client_reference_id", order.order_id),
+            ("customer_email", customer_email.strip().lower()),
             ("success_url", self._redirect(success_url)),
             ("cancel_url", self._redirect(cancel_url)),
             ("metadata[bb_order_id]", order.order_id),

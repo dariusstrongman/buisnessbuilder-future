@@ -33,7 +33,7 @@ def setup():
     repository = InMemoryCommercialRepository()
     seed_default_catalog(repository, effective_at=NOW)
     service = CommercialService(repository, identity.authorization, RecordingCommercialEventSink(),
-                                id_factory=ids, clock=lambda: NOW)
+                                id_factory=ids, clock=lambda: NOW, allow_test_admission=True)
     return context, repository, service
 
 
@@ -82,12 +82,14 @@ def linked_checkout(context, repo, service, order):
     return checkout
 
 
-def session_object(order, *, subscription=None, recipient_order=None, paid=True):
+def session_object(order, *, subscription=None, recipient_order=None, paid=True,
+                   customer_email="checkout-founder@example.test"):
     return {"id": "cs_test_fixture_0001", "client_reference_id": recipient_order or order.order_id,
             "payment_status": "paid" if paid else "unpaid", "currency": "usd",
             "amount_subtotal": order.total.minor_units, "amount_total": order.total.minor_units,
             "payment_intent": "pi_fixture_0001" if not subscription else None,
-            "subscription": subscription}
+            "subscription": subscription, "customer_details": {"email": customer_email},
+            "metadata": {"bb_order_id": order.order_id}}
 
 
 def test_canonical_prices_and_quote_floor():
@@ -137,6 +139,15 @@ def test_forged_replay_wrong_owner_and_wrong_amount_fail_closed():
     signature, raw = signed_event("checkout.session.completed", wrong, ref="evt_fixture_0004")
     with pytest.raises(CommercialConflict):
         ingress.handle(signature, raw)
+    wrong_customer = session_object(order, customer_email="another-founder@example.test")
+    signature, raw = signed_event("checkout.session.completed", wrong_customer, ref="evt_fixture_wrong_customer")
+    with pytest.raises(CommercialConflict):
+        ingress.handle(signature, raw)
+    wrong_metadata = session_object(order)
+    wrong_metadata["metadata"]["bb_order_id"] = "order_other_tenant"
+    signature, raw = signed_event("checkout.session.completed", wrong_metadata, ref="evt_fixture_wrong_metadata")
+    with pytest.raises(CommercialConflict):
+        ingress.handle(signature, raw)
     assert not repo.get_current_entitlement_grants(context.tenant_id, context.company_id)
 
 
@@ -157,6 +168,40 @@ def test_bundle_requires_paid_upfront_and_retains_owned_state_after_cancel():
     grants = repo.get_current_entitlement_grants(context.tenant_id, context.company_id)
     assert all(item.status is EntitlementStatus.EXPIRED for item in grants if item.source_subscription_id and item.entitlement_class is EntitlementClass.STROMATION_MANAGED)
     assert all(item.status is EntitlementStatus.ACTIVE for item in grants if item.entitlement_class is EntitlementClass.CUSTOMER_OWNED)
+
+
+def test_out_of_band_invoice_paid_cannot_reactivate_suspended_managed_work():
+    context, repo, service = setup()
+    order = ready_order(context, repo, service, OfferCode.BUSINESS_RUN)
+    linked_checkout(context, repo, service, order)
+    adapter, _ = provider(subscription=True)
+    ingress = StripeWebhookIngress(repo, service, adapter)
+    signature, raw = signed_event(
+        "checkout.session.completed", session_object(order, subscription="sub_fixture_0001")
+    )
+    assert ingress.handle(signature, raw) == 3
+    signature, raw = signed_event(
+        "invoice.payment_failed", {"subscription": "sub_fixture_0001"},
+        ref="evt_fixture_renewal_failed",
+    )
+    assert ingress.handle(signature, raw) == 1
+    history = repo.entitlement_grants.copy()
+    signature, raw = signed_event(
+        "invoice.paid", {"subscription": "sub_fixture_0001", "currency": "usd",
+                         "amount_paid": 29900, "paid_out_of_band": True},
+        ref="evt_fixture_out_of_band",
+    )
+    assert ingress.handle(signature, raw) == 0
+    assert repo.entitlement_grants == history
+    signature, raw = signed_event(
+        "invoice.payment_succeeded", {"subscription": "sub_fixture_0001",
+                                      "billing_reason": "subscription_cycle",
+                                      "currency": "usd", "amount_paid": 100},
+        ref="evt_fixture_wrong_renewal_amount",
+    )
+    with pytest.raises(CommercialConflict):
+        ingress.handle(signature, raw)
+    assert repo.entitlement_grants == history
 
 
 def test_quote_requires_audit_digest_founder_approval_and_supervised_eligibility():
@@ -253,7 +298,7 @@ def test_stripe_test_adapter_uses_server_order_items_and_rejects_live_credential
     adapter, calls = provider()
     provider_ref, url = adapter.open_checkout(
         order=order, idempotency_key="bb:order:retry", success_url="https://pilot.example.test/success",
-        cancel_url="https://pilot.example.test/cancel",
+        cancel_url="https://pilot.example.test/cancel", customer_email="checkout-founder@example.test",
     )
     assert provider_ref.startswith("cs_test_") and url.startswith("https://checkout.stripe.com/")
     body = calls[0][2].decode()
