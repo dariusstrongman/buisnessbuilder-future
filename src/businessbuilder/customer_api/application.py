@@ -1932,6 +1932,7 @@ class CustomerApi:
             "code": item.entitlement_code,
             "class": item.entitlement_class.value,
             "status": item.status.value,
+            "provenance": item.provenance.value if item.provenance else None,
             "effective_until": CustomerApi._time(item.effective_until),
             "version": item.version,
         }

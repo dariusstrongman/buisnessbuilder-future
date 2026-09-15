@@ -92,6 +92,10 @@ def test_founder_approved_pilot_redemption_concurrency_restart_and_tenant_isolat
     grants = api1.commercial_repository.get_current_entitlement_grants(tenant_id, company_id)
     assert grants and any(item.entitlement_class is EntitlementClass.STROMATION_MANAGED for item in grants)
     assert all(item.provenance is AccessSource.PILOT_ACCESS for item in grants)
+    public_grants = call(api1, "GET", "/api/v1/entitlements", token, company_id=company_id)
+    assert public_grants.status == 200
+    assert public_grants.body["entitlements"]
+    assert all(item["provenance"] == "PILOT_ACCESS" for item in public_grants.body["entitlements"])
     assert api1.commercial_repository.get_current_entitlement_grants("tenant_wrong", company_id) == ()
     assert api1.commercial_repository.get_payment_for_order(tenant_id, company_id, order_id) is None
     assert api1.commercial_repository.list_current_subscriptions(tenant_id, company_id) == ()
