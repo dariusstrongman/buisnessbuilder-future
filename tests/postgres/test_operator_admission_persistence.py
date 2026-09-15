@@ -20,6 +20,25 @@ from tests.commercial.test_operator_admission import (
 
 
 @pytest.mark.skipif(not os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_DSN"), reason="isolated PostgreSQL required")
+def test_long_lived_api_rechecks_external_operator_appointment_and_revocation():
+    dsn = os.environ["BUSINESSBUILDER_TEST_POSTGRES_DSN"]
+    prefix = os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_SCHEMA", "bb_test")
+    schema = f"{prefix}_live_grant_{uuid4().hex[:10]}"
+    api_repo = PostgresCommercialRepository(dsn, schema=schema)
+    writer_repo = PostgresCommercialRepository(dsn, schema=schema)
+    context, _, _, authority, principal, _, _ = setup(writer_repo)
+    assert api_repo.get_operator_grant(context.tenant_id, context.company_id, principal.grant_id).active_at(NOW)
+    authority.revoke(
+        "privileged_test_control", tenant_id=context.tenant_id,
+        company_id=context.company_id, grant_id=principal.grant_id,
+        reason_code="isolated_external_revocation",
+    )
+    assert not api_repo.get_operator_grant(context.tenant_id, context.company_id, principal.grant_id).active_at(NOW)
+    writer_repo.close()
+    api_repo.close()
+
+
+@pytest.mark.skipif(not os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_DSN"), reason="isolated PostgreSQL required")
 def test_operator_grant_admission_restart_and_scope():
     dsn = os.environ["BUSINESSBUILDER_TEST_POSTGRES_DSN"]
     prefix = os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_SCHEMA", "bb_test")

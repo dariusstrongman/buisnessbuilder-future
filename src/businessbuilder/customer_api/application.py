@@ -2128,6 +2128,12 @@ class CustomerApi:
                      "offer_code": item.offer_code, "payment_eligibility": item.eligibility.value}
                     for item in orders
                 ],
+                "subscriptions": [
+                    {"subscription_id": item.subscription_id, "order_id": item.order_id,
+                     "status": item.status.value, "renewal_state": item.renewal_state.value,
+                     "period_ends_at": self._time(item.billing_period.ends_at)}
+                    for item in self.commercial_repository.list_current_subscriptions(tenant_id, company_id)
+                ],
                 "active_entitlements": sum(
                     item.status.value == "active"
                     for item in self.commercial_repository.get_current_entitlement_grants(tenant_id, company_id)

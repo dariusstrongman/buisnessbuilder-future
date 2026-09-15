@@ -293,6 +293,27 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
     def _scope(tenant_id: str, company_id: str, record_id: str) -> str:
         return f"{tenant_id}\x1f{company_id}\x1f{record_id}"
 
+    def get_operator_grant(self, tenant_id: str, company_id: str, grant_id: str):
+        """Recheck privileged appointments in PostgreSQL, including external revocation.
+
+        Pilot appointments can be committed by a separate bounded task after the
+        long-lived API process starts. Its startup snapshot must not grant or
+        deny authority based on stale appointment versions.
+        """
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_commercial_records
+                   WHERE kind = 'operator_grant' AND scope_key = %s
+                   ORDER BY version""",
+                (self._scope(tenant_id, company_id, grant_id),),
+            )
+            history = [decode_record(row["body"], _COMMERCIAL_TYPES) for row in cursor]
+            if history:
+                self.operator_grants[(tenant_id, company_id, grant_id)] = history
+            else:
+                self.operator_grants.pop((tenant_id, company_id, grant_id), None)
+        return super().get_operator_grant(tenant_id, company_id, grant_id)
+
     def _load_postgres(self) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute(

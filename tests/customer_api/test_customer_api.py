@@ -533,6 +533,7 @@ class CustomerApiTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
         self.assertFalse(build_room.body["build_room"]["readiness"]["ready"])
+        self.assertEqual([], build_room.body["build_room"]["commercial"]["subscriptions"])
 
     def test_denial_audit_is_durable_and_contains_no_request_payload(self) -> None:
         self.request(
