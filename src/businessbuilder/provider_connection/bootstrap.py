@@ -6,7 +6,7 @@ from businessbuilder.access_broker.ports import SecretStorePort
 from businessbuilder.agent_runtime.bootstrap import PostgresAgentRuntime
 from businessbuilder.identity import AuthorizationPolicy
 
-from .ports import OAuthProviderPort
+from .ports import OAuthProviderPort, ScopedKeyProviderPort
 from .service import ProviderConnectionService
 
 
@@ -15,6 +15,7 @@ def attach_provider_connections(
     *,
     secret_store: SecretStorePort,
     oauth_providers: dict[str, OAuthProviderPort],
+    scoped_key_providers: dict[str, ScopedKeyProviderPort] | None = None,
     secret_locator_factory: Callable[[str, str, str], str] | None = None,
     clock=None,
 ) -> ProviderConnectionService:
@@ -28,6 +29,8 @@ def attach_provider_connections(
         broker=app.broker,
         secret_store=secret_store,
         providers=oauth_providers,
+        scoped_key_providers=scoped_key_providers,
+        company_brain=app.company_brain,
         audit=app.runtime.audit,
         clock=clock or app.runtime.clock,
         id_factory=app.runtime.id_factory,

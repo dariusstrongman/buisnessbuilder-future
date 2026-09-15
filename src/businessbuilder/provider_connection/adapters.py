@@ -13,7 +13,7 @@ from businessbuilder.access_broker.ports import EphemeralArtifact, EphemeralSecr
 from businessbuilder.outbound_communications.models import DeliveryStatus, VerifiedDeliveryEvent
 
 from .models import OAuthTokenMaterial, ProviderCallbackEvent, ProviderFailureClass, ProviderReality
-from .ports import OAuthProviderPort
+from .ports import OAuthProviderPort, ScopedKeyProviderPort
 
 
 class SandboxProviderError(RuntimeError):
@@ -26,6 +26,9 @@ class SandboxEmailProvider(OAuthProviderPort, ExternalProviderPort):
     """Deterministic, process-local OAuth/email provider; it cannot contact a network."""
 
     provider = "sandbox-email"
+    capability = "EMAIL"
+    environment = "sandbox"
+    account_ownership = "business_owned"
     allowed_scopes = frozenset({"mail.read", "mail.send"})
     allowed_operations = frozenset({
         "read_message", "classify_message", "draft_reply", "send_preapproved_reply",
@@ -171,3 +174,53 @@ class SandboxEmailProvider(OAuthProviderPort, ExternalProviderPort):
             return ProviderReality(False, connection.provider_account_id, frozenset(),
                                    failure_class=ProviderFailureClass.RECONNECT_REQUIRED)
         return ProviderReality(True, value[0], value[1], (("environment", "sandbox"),))
+
+
+class SandboxCalendarProvider(SandboxEmailProvider):
+    """OAuth-shaped calendar proof only; it has no calendar or email execution authority."""
+
+    provider = "sandbox-calendar"
+    capability = "CALENDAR"
+    allowed_scopes = frozenset({"calendar.read"})
+    allowed_operations = frozenset()
+
+    def authorization_url(self, *, state, code_challenge, redirect_uri, scopes, nonce) -> str:
+        if not scopes or not scopes <= self.allowed_scopes:
+            raise PermissionError("requested OAuth scope is not allowed")
+        return "https://sandbox-calendar.invalid/oauth/authorize?" + urlencode({
+            "state": state, "code_challenge": code_challenge,
+            "code_challenge_method": "S256", "redirect_uri": redirect_uri,
+            "scope": " ".join(sorted(scopes)), "nonce": nonce,
+        })
+
+    def _new_tokens(self, scopes: frozenset[str]) -> OAuthTokenMaterial:
+        material = super()._new_tokens(scopes)
+        material.provider_account_id = "sandbox_business_calendar_001"
+        self._tokens[material.access_token()] = (material.provider_account_id, scopes, True)
+        return material
+
+    def execute(self, **kwargs):
+        raise PermissionError("sandbox calendar adapter cannot execute provider actions")
+
+
+class SandboxScopedKeyProvider(ScopedKeyProviderPort):
+    """Process-local CRM credential proof; no network or CRM action is available."""
+
+    provider = "sandbox-crm-key"
+    capability = "CRM"
+    environment = "sandbox"
+    account_ownership = "business_owned"
+
+    def __init__(self) -> None:
+        self._accepted_digest = None
+
+    def issue_test_key(self) -> bytes:
+        value = secrets.token_urlsafe(32).encode()
+        self._accepted_digest = sha256(value).digest()
+        return value
+
+    def validate_key(self, value: memoryview) -> str:
+        digest = sha256(value).digest()
+        if self._accepted_digest is None or not hmac.compare_digest(digest, self._accepted_digest):
+            raise PermissionError("test provider credential is invalid")
+        return "sandbox_business_crm_001"

@@ -119,6 +119,8 @@ class ProviderConnection:
     compromised_at: datetime | None = None
     provider_metadata: tuple[tuple[str, str], ...] = ()
     secret_ref_ids: tuple[str, ...] = ()
+    capability: str = "EMAIL"
+    account_ownership: str = "unverified"
 
     def __post_init__(self) -> None:
         for name in ("connection_id", "account_id", "tenant_id", "company_id", "provider"):
@@ -138,6 +140,13 @@ class ProviderConnection:
             _require_id(scope, "oauth scope")
         if not self.account_type or not self.auth_method:
             raise ValueError("provider connection account_type and auth_method are required")
+        if self.capability not in {
+            "EMAIL", "CALENDAR", "CRM", "PAYMENTS", "SCHEDULING", "ACCOUNTING",
+            "ANALYTICS", "LOCAL_PRESENCE", "DOMAIN_DNS",
+        }:
+            raise ValueError("provider connection capability is not supported")
+        if self.account_ownership not in {"business_owned", "founder_owned_legacy", "unverified"}:
+            raise ValueError("provider connection ownership is not supported")
         if len(self.provider_metadata) > 32 or any(
             not key or len(key) > 80 or len(value) > 300
             for key, value in self.provider_metadata

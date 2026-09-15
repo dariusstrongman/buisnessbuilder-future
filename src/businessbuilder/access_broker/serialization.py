@@ -51,7 +51,7 @@ def decode_broker_record(kind: str, data: dict):
         data["classification"] = ArtifactClassification(data["classification"])
         data["status"] = ArtifactStatus(data["status"])
         return ArtifactRecord(**data)
-    if kind == "provider_health":
+    if kind in {"provider_health", "connection_command"}:
         from businessbuilder.provider_connection.serialization import decode_provider_record
         return decode_provider_record(kind, data)
     raise ValueError("unsupported broker record kind")

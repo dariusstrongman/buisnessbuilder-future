@@ -13,6 +13,10 @@ from businessbuilder.access_broker import (
     ExternalCredentialRef, JobSecretRef, ProviderConnection,
 )
 from businessbuilder.access_broker.ports import SecretStorePort
+from businessbuilder.access_broker.ports import EphemeralSecret
+from businessbuilder.access_broker.models import stable_id
+from businessbuilder.company_brain import CompanyBrainService, EntityRef, Provenance, RecordKind, Scope
+from businessbuilder.company_brain.errors import ConflictError, NotFoundError
 from businessbuilder.access_broker.service import BrokerDenied, SecretArtifactBroker
 from businessbuilder.agent_runtime.models import AgentJobEnvelope, RuntimeSchedule
 from businessbuilder.identity import (
@@ -23,10 +27,11 @@ from businessbuilder.runtime.audit import AuditLog
 from businessbuilder.runtime.storage import RuntimeRepository
 
 from .models import (
-    AuthorizationStart, OAuthTokenMaterial, OAuthTransaction, ProviderCallbackEvent,
-    ProviderFailureClass, ProviderHealth, digest_text,
+    AuthorizationStart, ConnectionCommand, OAuthTokenMaterial, OAuthTransaction, ProviderCallbackEvent,
+    ConnectionHealthState, ProviderFailureClass, ProviderHealth, digest_text,
 )
-from .ports import OAuthProviderPort
+from .connections import connection_state, normalize_health, safe_connection
+from .ports import OAuthProviderPort, ScopedKeyProviderPort
 
 
 ROLE_OPERATION_SCOPES = {
@@ -50,6 +55,8 @@ class ProviderConnectionService:
     def __init__(self, *, repository: RuntimeRepository, principal_authority: PrincipalContextAuthority,
                  authorization: AuthorizationPolicy, broker: SecretArtifactBroker,
                  secret_store: SecretStorePort, providers: dict[str, OAuthProviderPort],
+                 scoped_key_providers: dict[str, ScopedKeyProviderPort] | None = None,
+                 company_brain: CompanyBrainService | None = None,
                  audit: AuditLog, clock: Callable[[], datetime], id_factory: Callable[[str], str],
                  secret_locator_factory: Callable[[str, str, str], str] | None = None,
                  state_lifetime: timedelta = timedelta(minutes=10),
@@ -60,6 +67,8 @@ class ProviderConnectionService:
         self.broker = broker
         self.secret_store = secret_store
         self.providers = providers
+        self.scoped_key_providers = scoped_key_providers or {}
+        self.company_brain = company_brain
         self.audit = audit
         self.clock = clock
         self.id_factory = id_factory
@@ -74,6 +83,7 @@ class ProviderConnectionService:
               reconnect_connection_id: str | None = None) -> AuthorizationStart:
         trusted = self._require_customer(principal, tenant_id, company_id)
         provider = self._provider(provider_name)
+        capability = getattr(provider, "capability", "EMAIL")
         if not scopes or not scopes <= provider.allowed_scopes:
             self._denied(trusted, "provider.oauth.start", "requested_scope_denied")
             raise OAuthFlowDenied("requested OAuth scope is not permitted")
@@ -92,13 +102,14 @@ class ProviderConnectionService:
             account_id = self.id_factory("external_account")
             self.broker.register_external_account(ExternalAccount(
                 account_id, tenant_id, company_id, provider_name,
-                f"pending_{connection_id}", "Pending sandbox connection",
+                f"pending_{connection_id}", "Pending business connection",
                 ConnectionStatus.PENDING_AUTHORIZATION, now, now,
             ), actor_id=trusted.user_id)
         pending = ProviderConnection(
             connection_id, account_id, tenant_id, company_id, provider_name,
             ConnectionStatus.PENDING_AUTHORIZATION, now, now,
-            account_type="email", scopes_requested=scopes, auth_method="oauth2_pkce",
+            account_type=capability.lower(), scopes_requested=scopes, auth_method="oauth2_pkce",
+            capability=capability, account_ownership="unverified",
             connected_by=trusted.user_id,
         )
         if reconnect_connection_id:
@@ -163,7 +174,7 @@ class ProviderConnectionService:
                 self.secret_store.store(locator, material.encode_for_vault())
                 credential = ExternalCredentialRef(
                     secret_ref, connection.connection_id, connection.tenant_id,
-                    connection.company_id, connection.provider, "email.oauth", locator,
+                    connection.company_id, connection.provider, f"{connection.capability.lower()}.oauth", locator,
                     ConnectionStatus.ACTIVE, now, now, material.expires_at,
                 )
                 active = replace(
@@ -172,6 +183,7 @@ class ProviderConnectionService:
                     scopes_granted=material.scopes, connected_at=now,
                     expires_at=material.expires_at, provider_metadata=material.safe_metadata,
                     secret_ref_ids=(secret_ref,), revoked_reason=None, revoked_at=None,
+                    account_ownership=getattr(provider, "account_ownership", "unverified"),
                     compromised_at=None,
                 )
         except Exception as exc:
@@ -187,7 +199,7 @@ class ProviderConnectionService:
             self.repository.save_broker_record(
                 "external_account", account.account_id, account.tenant_id, account.company_id,
                 replace(account, external_account_ref=active.provider_account_id or account.external_account_ref,
-                        label="Sandbox email", status=ConnectionStatus.ACTIVE, updated_at=now),
+                        label="Connected business account", status=ConnectionStatus.ACTIVE, updated_at=now),
             )
         self.broker.register_credential_ref(credential, actor_id=trusted.user_id)
         self._install_grants(active, credential, actor_id=trusted.user_id)
@@ -202,6 +214,184 @@ class ProviderConnectionService:
     def list_connections(self, principal, *, tenant_id, company_id) -> tuple[ProviderConnection, ...]:
         self._require_customer(principal, tenant_id, company_id, permission=Permission.VIEW_COMPANY_STATE)
         return self.repository.list_broker_records("provider_connection", tenant_id, company_id)
+
+    def dashboard_connections(self, principal, *, tenant_id: str, company_id: str) -> tuple[dict, ...]:
+        """Tenant-scoped, credential-free summaries for the permanent founder dashboard."""
+        connections = self.list_connections(principal, tenant_id=tenant_id, company_id=company_id)
+        at = self.clock()
+        return tuple(safe_connection(connection, self.repository.get_broker_record(
+            "provider_health", tenant_id, company_id, connection.connection_id
+        ), at=at) for connection in connections)
+
+    def configured_providers(self, principal, *, tenant_id: str, company_id: str) -> tuple[dict, ...]:
+        self._require_customer(principal, tenant_id, company_id, permission=Permission.VIEW_COMPANY_STATE)
+        oauth = tuple({
+            "provider": name,
+            "capability": getattr(provider, "capability", "EMAIL"),
+            "scopes": sorted(provider.allowed_scopes),
+            "environment": getattr(provider, "environment", "unknown"),
+            "auth_method": "oauth2_pkce",
+        } for name, provider in sorted(self.providers.items()))
+        scoped = tuple({
+            "provider": name, "capability": provider.capability, "scopes": [],
+            "environment": provider.environment, "auth_method": "scoped_api_key",
+        } for name, provider in sorted(self.scoped_key_providers.items()))
+        return oauth + scoped
+
+    def connect_scoped_key(self, principal, *, tenant_id: str, company_id: str,
+                           provider_name: str, credential: bytes,
+                           idempotency_key: str | None = None) -> ProviderConnection:
+        """Founder-authorized test/scoped-key path; plaintext exists only during validation/vault write."""
+        trusted = self._require_customer(principal, tenant_id, company_id)
+        provider = self.scoped_key_providers.get(provider_name)
+        if provider is None or provider.provider != provider_name or provider.environment != "sandbox":
+            raise OAuthFlowDenied("scoped-key provider is not configured for this safe environment")
+        if not 16 <= len(credential) <= 4096:
+            raise ValueError("credential length is invalid")
+        if idempotency_key is not None and (
+            not 16 <= len(idempotency_key) <= 160
+            or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-" for character in idempotency_key)
+        ):
+            raise ValueError("connection idempotency key is invalid")
+        with EphemeralSecret(credential) as ephemeral:
+            account_ref = ephemeral.use(provider.validate_key)
+            connection_id = stable_id("connection", tenant_id, company_id, provider_name, account_ref)
+            now = self.clock()
+            account_id = stable_id("external_account", tenant_id, company_id, provider_name, account_ref)
+            locator = self.secret_locator_factory(tenant_id, company_id, connection_id)
+            secret_ref = stable_id("secretref", tenant_id, company_id, connection_id)
+            command_id = stable_id("connection_command", tenant_id, company_id, idempotency_key) if idempotency_key else None
+            account = ExternalAccount(account_id, tenant_id, company_id, provider_name, account_ref,
+                                      "Dedicated business account", ConnectionStatus.ACTIVE, now, now)
+            connection = ProviderConnection(
+                connection_id, account_id, tenant_id, company_id, provider_name, ConnectionStatus.ACTIVE,
+                now, now, account_type=provider.capability.lower(), provider_account_id=account_ref,
+                auth_method="scoped_api_key", connected_by=trusted.user_id, connected_at=now,
+                secret_ref_ids=(secret_ref,), capability=provider.capability,
+                account_ownership=getattr(provider, "account_ownership", "unverified"),
+            )
+            ref = ExternalCredentialRef(
+                secret_ref, connection_id, tenant_id, company_id, provider_name,
+                f"{provider.capability.lower()}.api_key", locator, ConnectionStatus.ACTIVE, now, now,
+            )
+            stored = False
+            try:
+                with self.repository.transaction():
+                    prior_command = self.repository.get_broker_record(
+                        "connection_command", tenant_id, company_id, command_id
+                    ) if command_id else None
+                    if prior_command and (prior_command.provider, prior_command.account_ref, prior_command.connection_id) != (
+                        provider_name, account_ref, connection_id
+                    ):
+                        raise OAuthFlowDenied("connection idempotency key conflicts with a different account")
+                    existing = self.repository.get_broker_record(
+                        "provider_connection", tenant_id, company_id, connection_id
+                    )
+                    if existing and existing.status is ConnectionStatus.ACTIVE:
+                        if command_id and prior_command is None:
+                            self.repository.save_broker_record("connection_command", command_id,
+                                tenant_id, company_id, ConnectionCommand(tenant_id, company_id,
+                                idempotency_key, provider_name, account_ref, connection_id, now))
+                        return existing  # concurrent duplicate cannot overwrite a healthy credential.
+                    ephemeral.use(lambda value: self.secret_store.store(locator, bytes(value)))
+                    stored = True
+                    if existing is None:
+                        self.broker.register_external_account(account, actor_id=trusted.user_id)
+                        self.broker.register_connection(connection, actor_id=trusted.user_id)
+                    else:
+                        self.repository.save_broker_record("external_account", account_id, tenant_id, company_id, account)
+                        self.repository.save_broker_record("provider_connection", connection_id, tenant_id, company_id, connection)
+                    self.broker.register_credential_ref(ref, actor_id=trusted.user_id)
+                    if command_id and prior_command is None:
+                        self.repository.save_broker_record("connection_command", command_id,
+                            tenant_id, company_id, ConnectionCommand(tenant_id, company_id,
+                            idempotency_key, provider_name, account_ref, connection_id, now))
+                    self._health(connection, usable=True, auth_success=True)
+                    self._audit(trusted, "provider.connection.scoped_key_activated", connection_id,
+                                "scoped credential reference activated", {"provider": provider_name,
+                                "capability": provider.capability})
+                return connection
+            except Exception:
+                if stored:
+                    self.secret_store.revoke(locator)  # compensate a vault write if domain persistence failed.
+                raise
+
+    def record_operational_signal(self, *, tenant_id: str, company_id: str, connection_id: str,
+                                  error_code: str | None, usable: bool,
+                                  quota_remaining: int | None = None, quota_unit: str | None = None,
+                                  quota_warning_threshold: int | None = None,
+                                  action_required: str | None = None) -> ProviderHealth:
+        """Adapter/operator-only signal; never callable with a browser-supplied health value."""
+        connection = self.repository.get_broker_record("provider_connection", tenant_id, company_id, connection_id)
+        if connection is None:
+            raise LookupError("provider connection not found in scope")
+        if quota_remaining is not None and (quota_remaining < 0 or not quota_unit or len(quota_unit) > 32):
+            raise ValueError("quota signal is invalid")
+        if quota_warning_threshold is not None and (quota_warning_threshold < 0 or quota_remaining is None):
+            raise ValueError("quota warning threshold is invalid")
+        if error_code and (len(error_code) > 80 or not error_code.replace("_", "").isalnum()):
+            raise ValueError("provider error must be a normalized code, not a raw payload")
+        if action_required and action_required not in {"reconnect", "review_permissions", "top_up", "contact_provider"}:
+            raise ValueError("founder action signal is invalid")
+        now = self.clock()
+        prior = self.repository.get_broker_record("provider_health", tenant_id, company_id, connection_id)
+        state = normalize_health(error_code, usable=usable)
+        if connection.status is not ConnectionStatus.ACTIVE:
+            state = connection_state(connection, prior, at=now)
+            usable = False
+        elif quota_warning_threshold is not None and usable and quota_remaining <= quota_warning_threshold:
+            state = ConnectionHealthState.WARNING
+        value = ProviderHealth(
+            connection_id, tenant_id, company_id, usable,
+            prior.auth_successes if prior else 0, prior.auth_failures if prior else 0,
+            prior.refresh_successes if prior else 0, prior.refresh_failures if prior else 0,
+            error_code[:80] if error_code else None,
+            prior.rate_limited_until if prior else None,
+            prior.last_reconciled_at if prior else None, now,
+            state, now if usable else (prior.last_successful_check_at if prior else None),
+            now if error_code else (prior.last_failure_at if prior else None), action_required,
+            quota_remaining, quota_unit, now if quota_remaining is not None else None,
+        )
+        if action_required:
+            self._ensure_founder_action(connection, action_required)
+        self.repository.save_broker_record("provider_health", connection_id, tenant_id, company_id, value)
+        self._audit_system(connection, "provider.connection.health_changed", connection_id,
+                           {"health": state.value, "founder_action": action_required})
+        return value
+
+    def _ensure_founder_action(self, connection: ProviderConnection, action_kind: str) -> None:
+        if self.company_brain is None:
+            return
+        scope = Scope(connection.tenant_id, connection.company_id)
+        action_id = "founder_action_connection_" + sha256(connection.connection_id.encode()).hexdigest()[:20]
+        try:
+            self.company_brain.repository.get_record(scope, action_id)
+            return  # health improvement or duplicate signal may never silently complete the action.
+        except NotFoundError:
+            pass
+        action = {
+            "title": f"Restore {connection.provider.replace('-', ' ').title()} access",
+            "reason": "Only the customer account owner can reconnect, approve scopes or restore provider billing.",
+            "instructions": ["Review why this connection needs attention.",
+                             "Use the Connections area to complete the provider-owned step.",
+                             "Supply the provider authorization/result if Verification requires it."],
+            "state": "prepared", "responsibility": "FOUNDER_ACTION",
+            "partner_authority": "EXTERNAL_PROVIDER/AUTHORITY",
+            "authority_target": connection.provider,
+            "required_evidence_kinds": ["provider_authorization_result"],
+            "evidence_refs": [], "critical": False, "selected": True,
+        }
+        try:
+            self.company_brain.append_founder_action(
+                scope, action_id=action_id, data=action,
+                provenance=(Provenance("provider_connection_health", self.clock().isoformat(),
+                                       EntityRef("system", "provider_connection"), connection.connection_id),),
+                owner_ref=EntityRef("company", connection.company_id),
+            )
+        except ConflictError:
+            return  # another health checker created this same pending action concurrently.
+        self._audit_system(connection, "provider.connection.founder_action.created", action_id,
+                           {"action_kind": action_kind})
 
     def get_connection(self, principal, *, tenant_id, company_id, connection_id) -> ProviderConnection:
         self._require_customer(principal, tenant_id, company_id, permission=Permission.VIEW_COMPANY_STATE)
@@ -271,6 +461,15 @@ class ProviderConnectionService:
                        for grant in grants)
         ):
             raise BrokerDenied("provider refresh authority is inactive or out of scope")
+        health = self.repository.get_broker_record(
+            "provider_health", envelope.tenant_id, envelope.company_id, connection.connection_id
+        )
+        if connection_state(connection, health, at=now) not in {
+            ConnectionHealthState.HEALTHY, ConnectionHealthState.WARNING,
+        }:
+            raise BrokerDenied("provider connection health blocks this Runtime job")
+        if connection.auth_method == "scoped_api_key":
+            return False  # health/grants were revalidated; an API key has no OAuth refresh lifecycle.
         if credential.expires_at and credential.expires_at > now + self.refresh_window:
             return False
         owner = self.id_factory("refresh_worker")
@@ -382,6 +581,8 @@ class ProviderConnectionService:
         )
 
     def _install_grants(self, connection, credential, *, actor_id):
+        if connection.capability != "EMAIL":
+            return  # A new capability needs an existing AI Workforce role policy first.
         for role, operations in ROLE_OPERATION_SCOPES.items():
             allowed = set(operations)
             if "mail.read" not in connection.scopes_granted:
@@ -441,7 +642,16 @@ class ProviderConnectionService:
             (prior.refresh_failures if prior else 0) + int(refresh_failure),
             error, prior.rate_limited_until if prior else None,
             now if reconciled else (prior.last_reconciled_at if prior else None), now,
+            normalize_health(error, usable=usable),
+            now if usable else (prior.last_successful_check_at if prior else None),
+            now if error else (prior.last_failure_at if prior else None),
+            "reconnect" if error in {"reconnect_required", "refresh_invalid_grant"} else None,
+            prior.quota_remaining if prior else None,
+            prior.quota_unit if prior else None,
+            prior.quota_checked_at if prior else None,
         )
+        if value.action_required:
+            self._ensure_founder_action(connection, value.action_required)
         self.repository.save_broker_record("provider_health", connection.connection_id,
                                            connection.tenant_id, connection.company_id, value)
 

@@ -28,3 +28,12 @@ class OAuthProviderPort(ABC):
     @abstractmethod
     def reconcile_connection(self, connection: ProviderConnection, *, access_token: bytes) -> ProviderReality: ...
 
+
+class ScopedKeyProviderPort(ABC):
+    provider: str
+    capability: str
+    environment: str
+
+    @abstractmethod
+    def validate_key(self, value: memoryview) -> str:
+        """Return a safe account identifier or deny; never return the credential."""

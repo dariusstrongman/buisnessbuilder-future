@@ -25,7 +25,11 @@ class EphemeralBytes:
     def use(self, consumer: Callable[[memoryview], T]) -> T:
         if self._closed:
             raise RuntimeError("temporary material has been discarded")
-        return consumer(memoryview(self._value))
+        view = memoryview(self._value)
+        try:
+            return consumer(view)
+        finally:
+            view.release()
 
     @property
     def discarded(self) -> bool:

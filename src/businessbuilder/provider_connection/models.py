@@ -20,6 +20,19 @@ class ProviderFailureClass(StrEnum):
     PROVIDER_UNHEALTHY = "provider_unhealthy"
 
 
+class ConnectionHealthState(StrEnum):
+    HEALTHY = "HEALTHY"
+    WARNING = "WARNING"
+    ACTION_REQUIRED = "ACTION_REQUIRED"
+    DISCONNECTED = "DISCONNECTED"
+    AUTH_EXPIRED = "AUTH_EXPIRED"
+    PERMISSION_ERROR = "PERMISSION_ERROR"
+    RATE_LIMITED = "RATE_LIMITED"
+    BILLING_OR_CREDITS = "BILLING_OR_CREDITS"
+    PROVIDER_OUTAGE = "PROVIDER_OUTAGE"
+    UNKNOWN = "UNKNOWN"
+
+
 def classify_provider_failure(code: str) -> ProviderFailureClass:
     normalized = code.strip().lower()
     if normalized in {"invalid_grant", "refresh_token_revoked", "account_deleted", "token_revoked"}:
@@ -74,6 +87,26 @@ class ProviderHealth:
     rate_limited_until: datetime | None
     last_reconciled_at: datetime | None
     updated_at: datetime
+    state: ConnectionHealthState = ConnectionHealthState.UNKNOWN
+    last_successful_check_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    action_required: str | None = None
+    quota_remaining: int | None = None
+    quota_unit: str | None = None
+    quota_checked_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionCommand:
+    """Safe idempotency record; it contains account identity, never submitted credential material."""
+
+    tenant_id: str
+    company_id: str
+    idempotency_key: str
+    provider: str
+    account_ref: str
+    connection_id: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

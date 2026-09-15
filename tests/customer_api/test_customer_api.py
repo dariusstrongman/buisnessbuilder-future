@@ -25,7 +25,7 @@ from businessbuilder.commercial.pricing import OfferCode
 from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
 from tests.commercial.test_supervised_checkout import provider
 from businessbuilder.access_broker import InMemorySecretStore
-from businessbuilder.provider_connection import ProviderConnectionService, SandboxEmailProvider
+from businessbuilder.provider_connection import ProviderConnectionService, SandboxEmailProvider, SandboxScopedKeyProvider
 from businessbuilder.identity import AuthorizationPolicy
 from businessbuilder.company_brain import (
     Company,
@@ -162,6 +162,7 @@ class CustomerApiTests(unittest.TestCase):
         )
         self.secret_store = InMemorySecretStore()
         self.email_provider = SandboxEmailProvider(clock=lambda: self.now)
+        self.key_provider = SandboxScopedKeyProvider()
         lifecycle_broker = Mock()
         lifecycle_broker.register_external_account.side_effect = lambda value, actor_id: self.runtime_repository.save_broker_record(
             "external_account", value.account_id, value.tenant_id, value.company_id, value)
@@ -183,6 +184,8 @@ class CustomerApiTests(unittest.TestCase):
             authorization=AuthorizationPolicy(self.identity_repository), broker=lifecycle_broker,
             secret_store=self.secret_store,
             providers={self.email_provider.provider: self.email_provider},
+            scoped_key_providers={self.key_provider.provider: self.key_provider},
+            company_brain=self.brain,
             audit=self.runtime.audit, clock=lambda: self.now, id_factory=self.ids,
         )
         self.api.provider_connections = self.provider_connections
@@ -633,6 +636,16 @@ class CustomerApiTests(unittest.TestCase):
         for forbidden in ("secret_ref", "secret_locator", "access_token", "refresh_token", "arn:aws", "tenant_id"):
             self.assertNotIn(forbidden, serialized)
         self.assertEqual(1, len(self.request("GET", path, token=self.owner_token).body["provider_connections"]))
+        connections_path = f"/api/v1/companies/{self.company_id}/connections"
+        connections = self.request("GET", connections_path, token=self.owner_token)
+        self.assertEqual(200, connections.status)
+        self.assertEqual("HEALTHY", connections.body["connections"][0]["health"])
+        self.assertNotIn("secret_ref", json.dumps(connections.body))
+        room = self.request("GET", f"/api/v1/companies/{self.company_id}/build-room", token=self.owner_token)
+        self.assertEqual("EMAIL", room.body["build_room"]["connections"][0]["capability"])
+        self.assertEqual("runtime", room.body["build_room"]["ai_usage"]["authority"])
+        self.assertEqual(401, self.request("GET", connections_path).status)
+        self.assertEqual(405, self.request("POST", connections_path, token=self.owner_token, body={"health": "HEALTHY"}).status)
         status_path = f"{path}/{connection_id}"
         self.assertEqual(200, self.request("GET", status_path, token=self.owner_token).status)
         disconnected = self.request("POST", status_path + "/disconnect", token=self.owner_token, body={})
@@ -640,6 +653,50 @@ class CustomerApiTests(unittest.TestCase):
         reconnect = self.request("POST", status_path + "/reconnect", token=self.owner_token,
             body={"redirect_uri": "https://app.example.test/oauth/callback", "scopes": ["mail.read"]})
         self.assertEqual(200, reconnect.status)
+
+    def test_scoped_key_api_never_returns_credential_and_rejects_client_health_forgery(self) -> None:
+        key = self.key_provider.issue_test_key().decode()
+        command_key = "connection-command-customer-api-001"
+        path = f"/api/v1/companies/{self.company_id}/scoped-key-connections"
+        self.assertEqual(401, self.request("POST", path, body={"provider": self.key_provider.provider, "credential": key,
+            "idempotency_key": command_key}).status)
+        created = self.request("POST", path, token=self.owner_token,
+            body={"provider": self.key_provider.provider, "credential": key,
+                  "idempotency_key": command_key})
+        self.assertEqual(201, created.status)
+        self.assertEqual("CRM", created.body["provider_connection"]["capability"])
+        self.assertNotIn(key, json.dumps(created.body))
+        self.assertNotIn("secret_ref", json.dumps(created.body))
+        duplicate = self.request("POST", path, token=self.owner_token,
+            body={"provider": self.key_provider.provider, "credential": key,
+                  "idempotency_key": command_key})
+        self.assertEqual(created.body["provider_connection"]["provider_connection_id"],
+                         duplicate.body["provider_connection"]["provider_connection_id"])
+        forged = self.request("POST", path, token=self.owner_token,
+            body={"provider": self.key_provider.provider, "credential": key,
+                  "idempotency_key": command_key, "health": "HEALTHY"})
+        self.assertEqual(400, forged.status)
+        self.assertNotIn(key, json.dumps(forged.body))
+
+        connection_id = created.body["provider_connection"]["provider_connection_id"]
+        self.provider_connections.record_operational_signal(
+            tenant_id=self.tenant.tenant_id, company_id=self.company_id,
+            connection_id=connection_id, error_code="billing_required", usable=False,
+            action_required="top_up",
+        )
+        room = self.request("GET", f"/api/v1/companies/{self.company_id}/build-room", token=self.owner_token)
+        actions = [item for item in room.body["build_room"]["founder_actions"]
+                   if item["founder_action_id"].startswith("founder_action_connection_")]
+        self.assertEqual(1, len(actions))
+        self.assertEqual("prepared", actions[0]["state"])
+        self.assertEqual(["provider_authorization_result"], actions[0]["required_evidence_kinds"])
+        self.provider_connections.record_operational_signal(
+            tenant_id=self.tenant.tenant_id, company_id=self.company_id,
+            connection_id=connection_id, error_code=None, usable=True,
+        )
+        latest = self.request("GET", f"/api/v1/companies/{self.company_id}/founder-actions", token=self.owner_token)
+        self.assertEqual("prepared", [item for item in latest.body["founder_actions"]
+            if item["founder_action_id"] == actions[0]["founder_action_id"]][0]["state"])
 
     def test_provider_api_auth_scope_methods_and_member_boundary(self) -> None:
         path = f"/api/v1/companies/{self.company_id}/provider-connections"

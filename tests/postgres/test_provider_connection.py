@@ -8,6 +8,9 @@ from uuid import uuid4
 
 from businessbuilder.postgres import PostgresRuntimeRepository
 from businessbuilder.provider_connection.models import OAuthTransaction, digest_text
+from businessbuilder.provider_connection.models import ConnectionCommand, ConnectionHealthState, ProviderHealth
+from businessbuilder.access_broker.models import ConnectionStatus, ProviderConnection
+from businessbuilder.provider_connection.connections import safe_connection
 
 
 NOW = datetime(2026, 9, 13, 22, 0, tzinfo=timezone.utc)
@@ -43,6 +46,48 @@ class PostgresProviderConnectionTests(unittest.TestCase):
             transaction.pkce_verifier_digest, at=NOW))
         second.close()
 
+    def test_connection_health_and_opaque_refs_survive_restart_and_isolate_tenants(self):
+        first = PostgresRuntimeRepository(self.dsn, schema=self.schema)
+        connection = ProviderConnection(
+            "connection_dashboard_pg", "account_dashboard_pg", "tenant_pg", "company_pg",
+            "sandbox-calendar", ConnectionStatus.ACTIVE, NOW, NOW,
+            account_type="calendar", provider_account_id="calendar_business_001",
+            scopes_requested=frozenset({"calendar.read"}),
+            scopes_granted=frozenset({"calendar.read"}),
+            connected_at=NOW, capability="CALENDAR",
+            secret_ref_ids=("secretref_dashboard_pg",),
+        )
+        health = ProviderHealth(
+            connection.connection_id, connection.tenant_id, connection.company_id, True,
+            1, 0, 0, 0, None, None, NOW, NOW,
+            ConnectionHealthState.WARNING, NOW, None, None, 2, "requests", NOW,
+        )
+        command = ConnectionCommand("tenant_pg", "company_pg", "pg-connection-command-001",
+                                    connection.provider, connection.provider_account_id,
+                                    connection.connection_id, NOW)
+        first.save_broker_record("provider_connection", connection.connection_id,
+                                 connection.tenant_id, connection.company_id, connection)
+        first.save_broker_record("provider_health", connection.connection_id,
+                                 connection.tenant_id, connection.company_id, health)
+        first.save_broker_record("connection_command", "connection_command_dashboard_pg",
+                                 connection.tenant_id, connection.company_id, command)
+        first.close()
+        reopened = PostgresRuntimeRepository(self.dsn, schema=self.schema)
+        durable_connection = reopened.get_broker_record("provider_connection", "tenant_pg", "company_pg", connection.connection_id)
+        durable_health = reopened.get_broker_record("provider_health", "tenant_pg", "company_pg", connection.connection_id)
+        self.assertEqual(connection, durable_connection)
+        self.assertEqual(health, durable_health)
+        self.assertEqual(command, reopened.get_broker_record("connection_command", "tenant_pg",
+                                                              "company_pg", "connection_command_dashboard_pg"))
+        view = safe_connection(durable_connection, durable_health, at=NOW)
+        self.assertEqual("WARNING", view["health"])
+        self.assertNotIn("secretref_dashboard_pg", str(view))
+        self.assertIsNone(reopened.get_broker_record("provider_connection", "tenant_other", "company_pg", connection.connection_id))
+        self.assertIsNone(reopened.get_broker_record("provider_health", "tenant_pg", "company_other", connection.connection_id))
+        self.assertIsNone(reopened.get_broker_record("connection_command", "tenant_other", "company_pg",
+                                                    "connection_command_dashboard_pg"))
+        reopened.close()
+
     def test_refresh_lease_and_callback_dedupe_are_concurrency_safe(self):
         repositories = [PostgresRuntimeRepository(self.dsn, schema=self.schema) for _ in range(2)]
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -55,4 +100,3 @@ class PostgresProviderConnectionTests(unittest.TestCase):
                 "sandbox-email", "callback_pg_001"), repositories))
         self.assertEqual(1, sum(callbacks))
         for repository in repositories: repository.close()
-

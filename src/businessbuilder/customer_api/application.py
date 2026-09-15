@@ -79,6 +79,12 @@ _EXISTING_AUDIT_ROUTE = re.compile(
 _PROVIDER_CONNECTIONS_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections$"
 )
+_CONNECTIONS_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/connections$"
+)
+_SCOPED_KEY_CONNECTION_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/scoped-key-connections$"
+)
 _PROVIDER_CONNECTION_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections/([A-Za-z0-9_-]{1,160})(?:/(disconnect|reconnect))?$"
 )
@@ -972,6 +978,38 @@ class CustomerApi:
             journey["verification"] = self._readiness(principal)
             return ApiResponse(HTTPStatus.OK, {"journey": journey})
 
+        match = _CONNECTIONS_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            company_id = match.group(1)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id)
+            if self.provider_connections is None:
+                return ApiResponse(HTTPStatus.OK, {"connections": []})
+            return ApiResponse(HTTPStatus.OK, {"connections": list(
+                self.provider_connections.dashboard_connections(
+                    principal, tenant_id=principal.tenant_id, company_id=company_id
+                )
+            )})
+
+        match = _SCOPED_KEY_CONNECTION_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "POST")
+            company_id = match.group(1)
+            principal = self._company_principal(token, user.user_id, company_id, support,
+                Permission.MANAGE_PROVIDER_CONNECTIONS, request_id, correlation_id)
+            if self.provider_connections is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            values = self._object(body, required={"provider", "credential", "idempotency_key"},
+                                  allowed={"provider", "credential", "idempotency_key"})
+            credential = self._short_string(values["credential"], 4096).encode()
+            connection = self.provider_connections.connect_scoped_key(
+                principal, tenant_id=principal.tenant_id, company_id=company_id,
+                provider_name=self._identifier(values["provider"], "provider"), credential=credential,
+                idempotency_key=self._short_string(values["idempotency_key"], 160),
+            )
+            return ApiResponse(HTTPStatus.CREATED, {"provider_connection": self._provider_connection(connection)})
+
         match = _PROVIDER_CONNECTIONS_ROUTE.fullmatch(path)
         if match:
             if self.provider_connections is None:
@@ -1573,6 +1611,10 @@ class CustomerApi:
             return ("POST",)
         if path == "/api/v1/provider-connections/oauth/callback":
             return ("POST",)
+        if _CONNECTIONS_ROUTE.fullmatch(path):
+            return ("GET",)
+        if _SCOPED_KEY_CONNECTION_ROUTE.fullmatch(path):
+            return ("POST",)
         if path == _PUBLIC_UNSUBSCRIBE_ROUTE:
             return ("POST",)
         if _PROVIDER_CONNECTIONS_ROUTE.fullmatch(path):
@@ -1948,6 +1990,8 @@ class CustomerApi:
             "scopes_requested": sorted(item.scopes_requested),
             "scopes_granted": sorted(item.scopes_granted),
             "auth_method": item.auth_method,
+            "capability": item.capability,
+            "account_ownership": item.account_ownership,
             "status": item.status.value,
             "connected_at": CustomerApi._time(item.connected_at),
             "expires_at": CustomerApi._time(item.expires_at),
@@ -2195,6 +2239,26 @@ class CustomerApi:
             }
         except PermissionError:
             projected["commercial"] = None
+        projected["dashboard_lifecycle"] = "business_dashboard" if readiness["ready"] else "build_room"
+        projected["connections"] = list(self.provider_connections.dashboard_connections(
+            principal, tenant_id=tenant_id, company_id=company_id
+        )) if self.provider_connections else []
+        projected["connection_providers"] = list(self.provider_connections.configured_providers(
+            principal, tenant_id=tenant_id, company_id=company_id
+        )) if self.provider_connections else []
+        agent_budget_ids = {
+            job.budget_ref for job in jobs
+            if job.provenance.get("source") == "businessbuilder.agent_runtime"
+        }
+        agent_budgets = [item for item in budgets if item.budget_id in agent_budget_ids]
+        one_currency = len({item.ceiling.currency for item in agent_budgets}) <= 1
+        projected["ai_usage"] = {
+            "authority": "runtime", "currency": agent_budgets[0].ceiling.currency if agent_budgets else "USD",
+            "budget_ceiling_minor": sum(item.ceiling.minor_units for item in agent_budgets) if agent_budgets and one_currency else None,
+            "reserved_minor": sum(item.reserved_minor for item in agent_budgets) if one_currency else 0,
+            "settled_minor": sum(item.settled_minor for item in agent_budgets) if one_currency else 0,
+            "budget_configured": bool(agent_budgets) and one_currency,
+        }
         return self._remove_internal_scope(projected)
 
     @staticmethod

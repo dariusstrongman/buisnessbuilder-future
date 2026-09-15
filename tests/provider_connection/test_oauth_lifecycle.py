@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 from urllib.parse import parse_qs, urlparse
@@ -11,6 +12,7 @@ import unittest
 from businessbuilder.access_broker import (
     ConnectionStatus, InMemorySecretStore, JobSecretRef,
 )
+from businessbuilder.access_broker.models import stable_id
 from businessbuilder.identity import (
     AuthorizationContext, AuthorizationDenied, AuthorizationPolicy,
     FakeDevAuthenticationProvider, IdentityService, PrincipalContextAuthority,
@@ -18,8 +20,10 @@ from businessbuilder.identity import (
 )
 from businessbuilder.provider_connection import (
     OAuthFlowDenied, ProviderConnectionService, ProviderFailureClass,
-    SandboxEmailProvider, classify_provider_failure,
+    SandboxCalendarProvider, SandboxEmailProvider, SandboxScopedKeyProvider, classify_provider_failure,
 )
+from businessbuilder.provider_connection.connections import connection_state, safe_connection
+from businessbuilder.provider_connection.models import ConnectionHealthState
 from businessbuilder.runtime import SQLiteRuntimeRepository
 from businessbuilder.runtime.audit import AuditLog
 from businessbuilder.runtime.ids import DeterministicIds
@@ -104,11 +108,17 @@ class ProviderConnectionTests(unittest.TestCase):
         self.repository = SQLiteRuntimeRepository(self.tmp.name + "/runtime.sqlite")
         self.store = InMemorySecretStore()
         self.provider = SandboxEmailProvider(clock=self.clock)
+        self.calendar_provider = SandboxCalendarProvider(clock=self.clock)
+        self.key_provider = SandboxScopedKeyProvider()
         self.broker = LifecycleBroker(self.repository)
         self.service = ProviderConnectionService(
             repository=self.repository, principal_authority=self.authority,
             authorization=AuthorizationPolicy(self.identity_repo), broker=self.broker,
-            secret_store=self.store, providers={self.provider.provider: self.provider},
+            secret_store=self.store, providers={
+                self.provider.provider: self.provider,
+                self.calendar_provider.provider: self.calendar_provider,
+            },
+            scoped_key_providers={self.key_provider.provider: self.key_provider},
             audit=AuditLog(self.repository, self.ids, self.clock), clock=self.clock,
             id_factory=self.ids,
         )
@@ -145,6 +155,188 @@ class ProviderConnectionTests(unittest.TestCase):
         self.assertNotIn("access_token", record_json)
         self.assertNotIn("refresh_token", record_json)
         self.assertEqual(2, len(self.repository.list_broker_records("capability_grant", self.tenant.tenant_id, self.company)))
+
+    def test_dashboard_health_is_durable_safe_and_worker_denies_degraded_connection(self):
+        started, query = self._start()
+        connection = self._complete(started, query)
+        tenant = self.tenant.tenant_id
+        healthy = self.service.dashboard_connections(self.principal, tenant_id=tenant, company_id=self.company)
+        self.assertEqual("HEALTHY", healthy[0]["health"])
+        self.assertEqual("EMAIL", healthy[0]["capability"])
+        for forbidden in ("secret_ref", "secret_locator", "access_token", "refresh_token", "tenant_id"):
+            self.assertNotIn(forbidden, json.dumps(healthy))
+        signal = self.service.record_operational_signal(
+            tenant_id=tenant, company_id=self.company, connection_id=connection.connection_id,
+            error_code="quota_exceeded", usable=False, action_required="top_up",
+        )
+        self.assertIs(ConnectionHealthState.BILLING_OR_CREDITS, signal.state)
+        degraded = self.service.dashboard_connections(self.principal, tenant_id=tenant, company_id=self.company)
+        self.assertIn("billing or credits", degraded[0]["message"])
+        self.assertNotIn("quota_exceeded", json.dumps(degraded))
+        with self.assertRaises(PermissionError):
+            self.service.refresh_for_job(
+                Envelope(tenant, self.company),
+                JobSecretRef(connection.secret_ref_ids[0], connection.provider, "communications.email", tenant, self.company),
+                operation="read_message",
+            )
+        self.repository.close()
+        self.repository = SQLiteRuntimeRepository(self.tmp.name + "/runtime.sqlite")
+        self.service.repository = self.repository
+        self.assertEqual("BILLING_OR_CREDITS", self.service.dashboard_connections(
+            self.principal, tenant_id=tenant, company_id=self.company)[0]["health"])
+
+    def test_quota_warning_requires_measured_value_and_explicit_threshold(self):
+        started, query = self._start()
+        connection = self._complete(started, query)
+        tenant = self.tenant.tenant_id
+        with self.assertRaises(ValueError):
+            self.service.record_operational_signal(
+                tenant_id=tenant, company_id=self.company, connection_id=connection.connection_id,
+                error_code=None, usable=True, quota_warning_threshold=5,
+            )
+        self.service.record_operational_signal(
+            tenant_id=tenant, company_id=self.company, connection_id=connection.connection_id,
+            error_code=None, usable=True, quota_remaining=3, quota_unit="requests",
+            quota_warning_threshold=5,
+        )
+        view = self.service.dashboard_connections(self.principal, tenant_id=tenant, company_id=self.company)[0]
+        self.assertEqual("WARNING", view["health"])
+        self.assertEqual(3, view["quota"]["remaining"])
+        self.assertIsNone(safe_connection(connection, None, at=NOW)["quota"])
+        self.assertIs(ConnectionHealthState.UNKNOWN, connection_state(connection, None, at=NOW))
+
+    def test_expired_access_token_refreshes_but_revoked_grant_denies(self):
+        started, query = self._start()
+        connection = self._complete(started, query)
+        tenant = self.tenant.tenant_id
+        reference = JobSecretRef(connection.secret_ref_ids[0], connection.provider,
+                                 "communications.email", tenant, self.company)
+        self.clock.now = NOW + timedelta(minutes=21)
+        self.principal = self.authority.issue(self.owner_token, tenant_id=tenant, company_id=self.company)
+        self.assertTrue(self.service.refresh_for_job(
+            Envelope(tenant, self.company), reference, operation="read_message"))
+        self.assertEqual("HEALTHY", self.service.dashboard_connections(
+            self.principal, tenant_id=tenant, company_id=self.company)[0]["health"])
+        self.service.disconnect(self.principal, tenant_id=tenant, company_id=self.company,
+                                connection_id=connection.connection_id)
+        with self.assertRaises(PermissionError):
+            self.service.refresh_for_job(Envelope(tenant, self.company), reference,
+                                         operation="read_message")
+
+    def test_cross_tenant_health_and_connection_reference_fail_closed(self):
+        started, query = self._start()
+        connection = self._complete(started, query)
+        with self.assertRaises(Exception):
+            self.service.dashboard_connections(self.principal, tenant_id="tenant_other", company_id=self.company)
+        with self.assertRaises(LookupError):
+            self.service.record_operational_signal(
+                tenant_id="tenant_other", company_id=self.company, connection_id=connection.connection_id,
+                error_code=None, usable=True,
+            )
+        self.assertEqual((), self.repository.list_broker_records("provider_health", "tenant_other", self.company))
+
+    def test_calendar_oauth_connection_is_provider_neutral_without_worker_grant(self):
+        started = self.service.start(self.principal, tenant_id=self.tenant.tenant_id,
+            company_id=self.company, provider_name=self.calendar_provider.provider,
+            redirect_uri="https://app.example.test/connections/callback",
+            scopes=frozenset({"calendar.read"}))
+        query = parse_qs(urlparse(started.authorization_url).query)
+        code = self.calendar_provider.issue_test_code(
+            code_challenge=query["code_challenge"][0],
+            redirect_uri="https://app.example.test/connections/callback",
+            scopes=frozenset({"calendar.read"}),
+        )
+        connection = self.service.complete(self.owner_token, state=query["state"][0], code=code,
+            pkce_verifier=started.pkce_verifier,
+            redirect_uri="https://app.example.test/connections/callback")
+        self.assertEqual("CALENDAR", connection.capability)
+        self.assertEqual("calendar.oauth", self.repository.get_broker_record(
+            "external_credential_ref", self.tenant.tenant_id, self.company,
+            connection.secret_ref_ids[0]).secret_type)
+        self.assertEqual((), self.repository.list_broker_records(
+            "capability_grant", self.tenant.tenant_id, self.company))
+        self.assertEqual("HEALTHY", self.service.dashboard_connections(
+            self.principal, tenant_id=self.tenant.tenant_id, company_id=self.company)[0]["health"])
+
+    def test_scoped_key_reference_is_deduplicated_and_revoked_without_leaking_value(self):
+        key = self.key_provider.issue_test_key()
+        tenant = self.tenant.tenant_id
+        connection = self.service.connect_scoped_key(
+            self.principal, tenant_id=tenant, company_id=self.company,
+            provider_name=self.key_provider.provider, credential=key,
+        )
+        duplicate = self.service.connect_scoped_key(
+            self.principal, tenant_id=tenant, company_id=self.company,
+            provider_name=self.key_provider.provider, credential=key,
+        )
+        self.assertEqual(connection.connection_id, duplicate.connection_id)
+        self.assertEqual(1, len(self.repository.list_broker_records("provider_connection", tenant, self.company)))
+        self.assertEqual("CRM", connection.capability)
+        self.assertEqual("scoped_api_key", connection.auth_method)
+        view = self.service.dashboard_connections(self.principal, tenant_id=tenant, company_id=self.company)
+        self.assertNotIn(key.decode(), json.dumps(view))
+        self.assertNotIn(key.decode(), json.dumps([repr(item) for item in self.repository.list_broker_records(
+            "external_credential_ref", tenant, self.company)]))
+        self.assertEqual((), self.repository.list_broker_records("capability_grant", tenant, self.company))
+        self.service.disconnect(self.principal, tenant_id=tenant, company_id=self.company,
+                                connection_id=connection.connection_id)
+        self.assertEqual("DISCONNECTED", self.service.dashboard_connections(
+            self.principal, tenant_id=tenant, company_id=self.company)[0]["health"])
+        with self.assertRaises(LookupError):
+            self.service.record_operational_signal(
+                tenant_id="tenant_other", company_id=self.company,
+                connection_id=connection.connection_id, error_code=None, usable=True,
+            )
+        with self.assertRaises(PermissionError):
+            self.service.connect_scoped_key(
+                self.principal, tenant_id=tenant, company_id=self.company,
+                provider_name=self.key_provider.provider, credential=b"invalid-credential-length",
+            )
+
+    def test_concurrent_scoped_key_connection_and_rollback_leave_one_safe_record(self):
+        key = self.key_provider.issue_test_key()
+        tenant = self.tenant.tenant_id
+        original = self.broker.register_connection
+        self.broker.register_connection = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("domain write failed"))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.service.connect_scoped_key(self.principal, tenant_id=tenant,
+                    company_id=self.company, provider_name=self.key_provider.provider, credential=key)
+        finally:
+            self.broker.register_connection = original
+        self.assertEqual((), self.repository.list_broker_records("provider_connection", tenant, self.company))
+        connection_id = stable_id("connection", tenant, self.company,
+                                  self.key_provider.provider, "sandbox_business_crm_001")
+        with self.assertRaises(LookupError):
+            self.store.resolve(self.service.secret_locator_factory(tenant, self.company, connection_id))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            values = list(pool.map(lambda _: self.service.connect_scoped_key(
+                self.principal, tenant_id=tenant, company_id=self.company,
+                provider_name=self.key_provider.provider, credential=key), range(2)))
+        self.assertEqual(values[0].connection_id, values[1].connection_id)
+        self.assertEqual(1, len(self.repository.list_broker_records("provider_connection", tenant, self.company)))
+        self.assertEqual(1, len(self.repository.list_broker_records("external_credential_ref", tenant, self.company)))
+
+    def test_scoped_key_idempotency_collision_denies_without_replacing_credential(self):
+        key = self.key_provider.issue_test_key()
+        tenant = self.tenant.tenant_id
+        command_key = "connection-collision-proof-001"
+        first = self.service.connect_scoped_key(self.principal, tenant_id=tenant,
+            company_id=self.company, provider_name=self.key_provider.provider,
+            credential=key, idempotency_key=command_key)
+        original = self.key_provider.validate_key
+        self.key_provider.validate_key = lambda value: "sandbox_business_crm_002"
+        try:
+            with self.assertRaises(OAuthFlowDenied):
+                self.service.connect_scoped_key(self.principal, tenant_id=tenant,
+                    company_id=self.company, provider_name=self.key_provider.provider,
+                    credential=key, idempotency_key=command_key)
+        finally:
+            self.key_provider.validate_key = original
+        self.assertEqual(1, len(self.repository.list_broker_records("provider_connection", tenant, self.company)))
+        command = self.repository.list_broker_records("connection_command", tenant, self.company)[0]
+        self.assertEqual(first.connection_id, command.connection_id)
+        self.assertNotIn(key.decode(), repr(command))
 
     def test_state_is_one_time_expiring_session_bound_and_redirect_pkce_bound(self):
         started, query = self._start()
