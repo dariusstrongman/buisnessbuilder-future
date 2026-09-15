@@ -83,6 +83,19 @@ def run() -> dict:
     if len(selected) != len(ORDERS):
         raise RuntimeError("the three actual Stripe sandbox Checkout completion events are not available")
     result = {"source": "actual_stripe_test_events", "orders": len(selected)}
+    for name, expected_upfront, expected_initial in (
+        ("business_run", 199500, 229400), ("existing_run", 169500, 199400),
+    ):
+        session = selected[ORDERS[name]]["data"]["object"]
+        if session.get("amount_subtotal") != expected_initial or not session.get("subscription"):
+            raise RuntimeError(f"{name} initial Stripe TEST subscription invoice total mismatch")
+        items = _get_json(
+            "api.stripe.com",
+            "/v1/checkout/sessions/" + session["id"] + "/line_items?limit=100", key,
+        ).get("data", [])
+        if sorted(item.get("amount_total") for item in items) != sorted((expected_upfront, 29900)):
+            raise RuntimeError(f"{name} upfront/first $299 cycle is not the canonical two-line bundle")
+        result[name + "_initial_cycle"] = "upfront_and_first_299_paid_in_test_checkout"
     for name, order_id in ORDERS.items():
         status, body = _send(selected[order_id], signer)
         if status != 200 or body.get("applied") != 0:
