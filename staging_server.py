@@ -44,7 +44,7 @@ def _proof_endpoints_enabled() -> bool:
     return enabled in {"1", "true", "yes"} and environment in PROOF_ENVIRONMENTS
 
 
-def _stripe_test_checkout_enabled(*, configured: bool) -> bool:
+def _supervised_stripe_test_admission_enabled(*, configured: bool) -> bool:
     enabled = os.environ.get("PILOT_SUPERVISED_STRIPE_TEST", "").strip().lower() in {"1", "true", "yes"}
     if not enabled:
         return False
@@ -438,12 +438,12 @@ if __name__ == "__main__":
         StripeTestPaymentProvider(api_key=stripe_key, webhook_secret=stripe_webhook)
         if stripe_key and stripe_webhook else None
     )
-    test_checkout = _stripe_test_checkout_enabled(configured=payment_provider is not None)
+    test_admission = _supervised_stripe_test_admission_enabled(configured=payment_provider is not None)
     server.customer_api = create_postgres_customer_api(
         signing_key=signing_key,
         founder_authentication_provider=cognito_authentication_from_environment(),
         payment_provider=payment_provider,
-        enable_residential_cleaning_test_checkout=test_checkout,
+        allow_supervised_stripe_test_admission=test_admission,
         checkout_success_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_SUCCESS_URL"),
         checkout_cancel_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_CANCEL_URL"),
     )

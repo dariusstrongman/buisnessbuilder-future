@@ -134,3 +134,63 @@ def test_running_business_audit_persists_without_a_fixed_payment_order():
     assert projected.body["journey"]["order"] is None
     assert not projected.body["journey"]["verification"]["ready"]
     restarted.close()
+
+
+@pytest.mark.skipif(not os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_DSN"), reason="isolated PostgreSQL required")
+def test_supervised_stripe_test_admission_never_fakes_scope_approval_payment():
+    dsn = os.environ["BUSINESSBUILDER_TEST_POSTGRES_DSN"]
+    prefix = os.environ.get("BUSINESSBUILDER_TEST_POSTGRES_SCHEMA", "bb_test")
+    schema = f"{prefix}_no_fake_payment_{uuid4().hex[:10]}"
+    ids = DeterministicIds()
+    identity_repo = PostgresIdentityRepository(dsn, schema=schema)
+    identity = IdentityService(identity_repo, id_factory=ids, clock=lambda: NOW)
+    founder = identity.register_user("no-fake-stripe-founder@example.test")
+    fake_auth = FakeDevAuthenticationProvider()
+    fake_auth.register(founder.user_id, founder.email, "no-fake-stripe-session")
+    sessions = SessionService(identity_repo, fake_auth, id_factory=ids, clock=lambda: NOW)
+    _, token = sessions.sign_in(founder.email, "no-fake-stripe-session")
+    identity_repo.close()
+    application = create_postgres_customer_api(
+        signing_key=b"isolated-supervised-stripe-signing-key-v1",
+        dsn=dsn, schema=schema, clock=lambda: NOW,
+        allow_supervised_stripe_test_admission=True,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    started = application.handle(
+        method="POST", path="/api/v1/pilots/residential-cleaning/intakes",
+        headers=headers, query={}, request_id="req_no_fake_start", correlation_id="corr_no_fake_start",
+        body={"idempotency_key": "supervised-no-fake-payment-0001", "intake": {
+            "starting_point": "idea", "idea": "Build a supervised Denton residential cleaning test company.",
+            "founder_display_name": "No Fake Founder", "organization_name": "No Fake Organization",
+            "company_name": "No Fake Cleaning", "country": "US", "region": "TX", "locality": "Denton",
+            "service_radius_miles": 12, "weekly_hours": 30, "startup_budget_minor": 250000,
+            "working_preferences": {"requested_package": "run"},
+        }},
+    )
+    assert started.status == 201
+    company_id = started.body["journey"]["company"]["company_id"]
+    approved = application.handle(
+        method="POST", path=f"/api/v1/companies/{company_id}/residential-cleaning-pilot/approve",
+        headers=headers, query={}, request_id="req_no_fake_approve", correlation_id="corr_no_fake_approve",
+        body={"approval_id": started.body["journey"]["scope_commit"]["approval_id"]},
+    )
+    assert approved.status == 200
+    order = approved.body["journey"]["order"]
+    assert order and order["status"] == "draft"
+    assert approved.body["journey"]["entitlements"] == []
+    assert approved.body["journey"]["verification"]["ready"] is False
+    application.close()
+    restarted = create_postgres_customer_api(
+        signing_key=b"isolated-supervised-stripe-signing-key-v1",
+        dsn=dsn, schema=schema, clock=lambda: NOW,
+        allow_supervised_stripe_test_admission=True,
+    )
+    projected = restarted.handle(
+        method="GET", path=f"/api/v1/companies/{company_id}/residential-cleaning-pilot",
+        headers=headers, query={}, body=None, request_id="req_no_fake_restart",
+        correlation_id="corr_no_fake_restart",
+    )
+    assert projected.status == 200
+    assert projected.body["journey"]["order"]["status"] == "draft"
+    assert projected.body["journey"]["entitlements"] == []
+    restarted.close()

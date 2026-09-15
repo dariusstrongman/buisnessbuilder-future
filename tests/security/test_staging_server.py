@@ -67,11 +67,11 @@ class StagingServerSecurityTests(unittest.TestCase):
         for environment in ("production", "staging"):
             with patch.dict("os.environ", {"ENVIRONMENT": environment, "PILOT_SUPERVISED_STRIPE_TEST": "1"}):
                 with self.assertRaises(RuntimeError):
-                    staging_server._stripe_test_checkout_enabled(configured=True)
+                    staging_server._supervised_stripe_test_admission_enabled(configured=True)
         with patch.dict("os.environ", {"ENVIRONMENT": "pilot", "PILOT_SUPERVISED_STRIPE_TEST": "1"}):
             with self.assertRaises(RuntimeError):
-                staging_server._stripe_test_checkout_enabled(configured=False)
-            self.assertTrue(staging_server._stripe_test_checkout_enabled(configured=True))
+                staging_server._supervised_stripe_test_admission_enabled(configured=False)
+            self.assertTrue(staging_server._supervised_stripe_test_admission_enabled(configured=True))
 
     def test_offline_proof_remains_available_only_with_explicit_opt_in(self) -> None:
         proof = {"status": "passed", "proof": "fixture"}

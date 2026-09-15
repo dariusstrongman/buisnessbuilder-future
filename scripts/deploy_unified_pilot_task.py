@@ -52,7 +52,15 @@ def deploy() -> tuple[str, str]:
     if (service.get("status") != "ACTIVE" or service.get("desiredCount") != 1
         or not service.get("taskDefinition", "").split("/")[-1].startswith(FAMILY + ":")):
         raise RuntimeError("existing isolated pilot service changed unexpectedly")
-    original_arn = service["taskDefinition"]
+    running_arns = ecs.list_tasks(cluster=CLUSTER, serviceName=SERVICE,
+                                  desiredStatus="RUNNING").get("taskArns", [])
+    running = ecs.describe_tasks(cluster=CLUSTER, tasks=running_arns).get("tasks", []) if running_arns else []
+    healthy = [task for task in running if task.get("lastStatus") == "RUNNING"
+               and all(container.get("healthStatus") == "HEALTHY"
+                       for container in task.get("containers", []))]
+    if len(healthy) != 1:
+        raise RuntimeError("one healthy rollback task required")
+    original_arn = healthy[0]["taskDefinitionArn"]
     original = ecs.describe_task_definition(taskDefinition=original_arn, include=["TAGS"])
     definition = original["taskDefinition"]
     if definition["family"] != FAMILY or len(definition["containerDefinitions"]) != 2:

@@ -57,6 +57,7 @@ def create_postgres_customer_api(
     communications_compliance=None,
     live_canary_readiness=None,
     enable_residential_cleaning_test_checkout: bool = False,
+    allow_supervised_stripe_test_admission: bool = False,
     residential_cleaning_evidence_verifier=None,
     residential_cleaning_evidence_store=None,
     residential_cleaning_malware_scanner=None,
@@ -101,7 +102,8 @@ def create_postgres_customer_api(
         RuntimeCommercialEventSink(runtime.events),
         id_factory=random_id,
         clock=clock,
-        allow_test_admission=enable_residential_cleaning_test_checkout,
+        allow_test_admission=(enable_residential_cleaning_test_checkout
+                              or allow_supervised_stripe_test_admission),
         operator_authority=CommercialOperatorAuthority(
             identity_repository, commercial_repository,
             signing_key=sha256(b"commercial-operator-v1:" + signing_key).digest(),
