@@ -1,0 +1,15 @@
+{
+  "scope": "first_supervised_paid_pilot_rehearsal_only",
+  "source_checkpoint": "9b7404f28b0add09e2643ff8136eb7c43c76c373",
+  "gates": [
+    {"kind": "ftc_business_opportunity_legal", "status": "HOLD", "owner_role": "qualified_counsel", "appointed_owner": null, "evidence_refs": [], "reason": "external_legal_decision_absent"},
+    {"kind": "texas_tax_package_classification", "status": "HOLD", "owner_role": "texas_cpa_or_tax_counsel", "appointed_owner": null, "evidence_refs": [], "reason": "external_tax_decision_absent"},
+    {"kind": "production_stripe", "status": "HOLD", "owner_role": "payment_operations", "appointed_owner": null, "evidence_refs": ["docs/UNIFIED_COGNITO_STRIPE_SANDBOX_ACCEPTANCE.md", "aws-name:stripetest", "aws-name:businessbuilder-pilot-stripe-webhook-v1"], "reason": "only_test_account_and_webhook_proven"},
+    {"kind": "production_cognito", "status": "HOLD", "owner_role": "identity_operations", "appointed_owner": null, "evidence_refs": ["docs/COGNITO_PILOT_ACCEPTANCE.md", "aws-name:businessbuilder-pilot-auth-v1"], "reason": "only_pilot_pool_and_optional_mfa_proven"},
+    {"kind": "operator_provisioning", "status": "HOLD", "owner_role": "platform_operator", "appointed_owner": null, "evidence_refs": ["docs/COGNITO_PILOT_ACCEPTANCE.md"], "reason": "production_operator_mfa_and_provisioning_absent"},
+    {"kind": "evidence_privacy_retention", "status": "HOLD", "owner_role": "privacy_security_operations", "appointed_owner": null, "evidence_refs": ["src/businessbuilder/residential_cleaning/evidence_review.py", "aws-name:businessbuilder-staging-artifacts-199949321335-us-east-1"], "reason": "real_malware_scanner_and_approved_retention_absent"},
+    {"kind": "monitoring_alert_ownership", "status": "HOLD", "owner_role": "monitoring_on_call", "appointed_owner": null, "evidence_refs": [], "reason": "businessbuilder_alert_route_and_owner_absent"},
+    {"kind": "rollback_migration", "status": "HOLD", "owner_role": "deployment_rollback", "appointed_owner": null, "evidence_refs": ["docs/SUPERVISED_PAID_PILOT_RELEASE_GATE_V1.md", "ecs-family:businessbuilder-pilot-auth-v1:12"], "reason": "no_gate_record_compatible_rollback_image_drill"},
+    {"kind": "customer_terms_refund_cancellation", "status": "HOLD", "owner_role": "product_counsel", "appointed_owner": null, "evidence_refs": ["docs/SUPERVISED_PAID_PILOT_RELEASE_GATE_V1.md"], "reason": "reviewed_terms_and_founder_acceptance_absent"}
+  ]
+}
