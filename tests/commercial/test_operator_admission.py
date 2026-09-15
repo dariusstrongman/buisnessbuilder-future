@@ -23,10 +23,11 @@ from businessbuilder.runtime.ids import DeterministicIds
 NOW = datetime(2026, 9, 15, tzinfo=timezone.utc)
 
 
-def setup(repository=None):
+def setup(repository=None, *, clock=None):
+    clock = clock if clock is not None else [NOW]
     ids = DeterministicIds()
     identity_repo = InMemoryIdentityRepository()
-    identity = IdentityService(identity_repo, id_factory=ids, clock=lambda: NOW)
+    identity = IdentityService(identity_repo, id_factory=ids, clock=lambda: clock[0])
     founder, _ = identity.register_founder("admission-founder@example.test", "Admission Founder")
     tenant, _, _ = identity.create_account(founder.user_id, "Admission Organization")
     identity.attach_company(AuthorizationContext(founder.user_id, tenant.tenant_id), "company_admission")
@@ -40,7 +41,7 @@ def setup(repository=None):
     identity.accept_membership(invitation.membership_id, operator.user_id)
     sessions = SessionService(
         identity_repo, provider=FakeDevAuthenticationProvider(), id_factory=ids,
-        clock=lambda: NOW,
+        clock=lambda: clock[0],
     )
     session, raw_session = sessions.issue_for_user(
         operator.user_id, provider_name="cognito", provider_session_id="test_provider_session"
@@ -49,7 +50,7 @@ def setup(repository=None):
     seed_default_catalog(repository, effective_at=NOW)
     appointment = CommercialOperatorAuthority(
         identity_repo, repository, signing_key=b"test_only_operator_signing_material_32bytes",
-        clock=lambda: NOW,
+        clock=lambda: clock[0],
         privileged_provisioner_verifier=lambda value: "platform_operator" if value == "privileged_test_control" else "",
     )
     grant = appointment.provision(
@@ -64,7 +65,7 @@ def setup(repository=None):
     )
     commercial = CommercialService(
         repository, identity.authorization, RecordingCommercialEventSink(),
-        id_factory=ids, clock=lambda: NOW, operator_authority=appointment,
+        id_factory=ids, clock=lambda: clock[0], operator_authority=appointment,
         tax_authority_verifier=lambda state, disposition, reference: reference == "test_tax_boundary_only",
     )
     return context, identity_repo, repository, appointment, principal, commercial, session
@@ -119,6 +120,57 @@ def test_payment_delay_and_tax_review_fail_closed():
             decision_ref="review_pending", tax_review_ref=None,
             expires_at=NOW + timedelta(minutes=30),
         )
+
+
+def test_delayed_admission_requires_fresh_signed_release_after_waiting_time():
+    clock = [NOW]
+    context, identity_repo, repo, authority, principal, commercial, _ = setup(clock=clock)
+    order = fixed_order(context, commercial)
+    delayed = release(context, principal, commercial, order.order_id,
+                      eligibility=PaymentEligibility.PAYMENT_DELAY_REQUIRED)
+    with pytest.raises(CommercialConflict):
+        commercial.create_checkout(context, order.order_id, "delay_checkout")
+    with pytest.raises(CommercialConflict):
+        commercial.release_payment(
+            principal, tenant_id=context.tenant_id, company_id=context.company_id,
+            order_id=order.order_id, eligibility=PaymentEligibility.PAY_NOW_ELIGIBLE,
+            eligible_at=None, tax_disposition=TaxDisposition.PROVIDER_CALCULATED,
+            tax_review_state=TaxReviewState.PROVIDER_CALCULATED,
+            decision_ref="fresh_operator_release", tax_review_ref="test_tax_boundary_only",
+            expires_at=NOW + timedelta(minutes=45),
+        )
+    clock[0] = NOW + timedelta(minutes=31)
+    with pytest.raises(CommercialConflict):
+        commercial.create_checkout(context, order.order_id, "delay_checkout")
+    sessions = SessionService(
+        identity_repo, provider=FakeDevAuthenticationProvider(),
+        id_factory=lambda kind: kind + "_renewed_operator_session",
+        clock=lambda: clock[0],
+    )
+    _, raw = sessions.issue_for_user(
+        principal.operator_user_id, provider_name="cognito",
+        provider_session_id="renewed_test_provider_session",
+    )
+    renewed_principal = authority.issue(
+        raw, tenant_id=context.tenant_id, company_id=context.company_id,
+        grant_id=principal.grant_id,
+    )
+    released = commercial.release_payment(
+        renewed_principal, tenant_id=context.tenant_id, company_id=context.company_id,
+        order_id=order.order_id, eligibility=PaymentEligibility.PAY_NOW_ELIGIBLE,
+        eligible_at=None, tax_disposition=TaxDisposition.PROVIDER_CALCULATED,
+        tax_review_state=TaxReviewState.PROVIDER_CALCULATED,
+        decision_ref="fresh_operator_release", tax_review_ref="test_tax_boundary_only",
+        expires_at=NOW + timedelta(minutes=45),
+    )
+    assert released.admission_id != delayed.admission_id
+    current = repo.get_admission(context.tenant_id, context.company_id, released.admission_id)
+    original = repo.get_admission(context.tenant_id, context.company_id, delayed.admission_id)
+    assert current.supersedes_admission_id == original.admission_id
+    assert original.eligibility is PaymentEligibility.PAYMENT_DELAY_REQUIRED
+    assert commercial.create_checkout(context, order.order_id, "delay_checkout").order_id == order.order_id
+    assert any(event.action == "order.payment_released" and event.reason == "fresh_operator_release"
+               for event in repo.audit)
 
 
 def test_forged_founder_role_scope_and_revoked_session_denied():

@@ -261,6 +261,7 @@ class CommercialAdmissionRecord:
     created_at: datetime
     expires_at: datetime
     test_only: bool = False
+    supersedes_admission_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

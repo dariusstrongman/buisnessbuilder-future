@@ -474,6 +474,7 @@ class CommercialService:
         order = self.repository.get_order(tenant_id, company_id, order_id)
         if order.status is not OrderStatus.DRAFT or not order.offer_code or order.total is None:
             raise CommercialConflict("priced draft required")
+        supersedes_admission_id = None
         if order.admission_id:
             existing = self.repository.get_admission(tenant_id, company_id, order.admission_id)
             if (existing.operator_user_id == operator.operator_user_id
@@ -487,7 +488,15 @@ class CommercialService:
                 and existing.expires_at == expires_at
                 and existing.order_digest == self._admission_digest(order)):
                 return order
-            raise CommercialConflict("commercial admission retry changed its scope or terms")
+            if (existing.eligibility is not PaymentEligibility.PAYMENT_DELAY_REQUIRED
+                or eligibility is not PaymentEligibility.PAY_NOW_ELIGIBLE
+                or existing.eligible_at is None or existing.eligible_at > now
+                or existing.order_digest != self._admission_digest(order)
+                or existing.quote_id != order.quote_id
+                or existing.decision_ref == decision_ref
+                or order.checkout_intent_id is not None):
+                raise CommercialConflict("commercial admission retry changed its scope or terms")
+            supersedes_admission_id = existing.admission_id
         if order.offer_code == OfferCode.EXISTING_RUN.value:
             if not order.quote_id:
                 raise CommercialConflict("founder-approved quote required")
@@ -499,7 +508,7 @@ class CommercialService:
             order.quote_id, operator.operator_user_id, operator.grant_id,
             self._admission_digest(order), eligibility, eligible_at,
             tax_disposition, tax_review_state, decision_ref, tax_review_ref,
-            now, expires_at,
+            now, expires_at, supersedes_admission_id=supersedes_admission_id,
         )
         self.repository.append_admission(admission)
         changed = replace(order, eligibility=eligibility, eligible_at=eligible_at,
