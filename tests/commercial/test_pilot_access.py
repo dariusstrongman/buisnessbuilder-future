@@ -104,6 +104,20 @@ def test_duplicate_redemption_code_rotation_and_tenant_scope():
                                     order.order_id, secret.value, secret)
 
 
+def test_synthetic_secret_rotation_blocks_new_use_but_preserves_prior_admission():
+    prior, prior_repo, prior_service, prior_order, prior_secret, _ = setup()
+    assert prior_service.redeem_pilot_access(prior, prior_order.order_id, prior_secret.value, prior_secret)
+    prior_grants = prior_repo.get_current_entitlement_grants(prior.tenant_id, prior.company_id)
+
+    fresh, fresh_repo, fresh_service, fresh_order, fresh_secret, _ = setup()
+    old_value = fresh_secret.value
+    fresh_secret.value = uuid4().hex
+    assert not fresh_service.redeem_pilot_access(fresh, fresh_order.order_id, old_value, fresh_secret)
+    assert fresh_repo.get_pilot_redemption(fresh.tenant_id, fresh.company_id) is None
+    assert fresh_service.redeem_pilot_access(fresh, fresh_order.order_id, fresh_secret.value, fresh_secret)
+    assert prior_repo.get_current_entitlement_grants(prior.tenant_id, prior.company_id) == prior_grants
+
+
 def test_aws_adapter_reads_only_named_field_without_exposing_payload():
     synthetic = SyntheticSecret()
     class Client:
