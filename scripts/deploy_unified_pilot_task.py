@@ -21,6 +21,7 @@ SERVICE = "businessbuilder-pilot-auth"
 FAMILY = "businessbuilder-pilot-auth-v1"
 ECR_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/businessbuilder-staging-app"
 IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+PILOT_EVIDENCE_BUCKET = "businessbuilder-staging-artifacts-199949321335-us-east-1"
 
 
 def _environment(container: dict, name: str, value: str) -> None:
@@ -78,7 +79,12 @@ def deploy() -> tuple[str, str]:
     backend, site = containers["backend"], containers["site"]
     backend["image"] = f"{ECR_REPOSITORY}@{backend_digest}"
     site["image"] = f"{ECR_REPOSITORY}@{site_digest}"
-    _environment(backend, "APP_VERSION", "unified-cognito-stripe-sandbox-v1")
+    app_version = os.environ.get("PILOT_APP_VERSION", "unified-cognito-stripe-sandbox-v1")
+    if app_version not in {"unified-cognito-stripe-sandbox-v1", "private-pilot-access-v1"}:
+        raise RuntimeError("unrecognized isolated pilot revision")
+    _environment(backend, "APP_VERSION", app_version)
+    if app_version == "private-pilot-access-v1":
+        _environment(backend, "PILOT_EVIDENCE_BUCKET", PILOT_EVIDENCE_BUCKET)
     _environment(backend, "PILOT_SUPERVISED_STRIPE_TEST", "1")
     _environment(backend, "BUSINESS_BUILDER_CHECKOUT_SUCCESS_URL",
                  "https://d3qncwxo58gn5b.cloudfront.net/build-room?checkout=returned")
@@ -87,7 +93,7 @@ def deploy() -> tuple[str, str]:
     _secret(backend, "STRIPE_TEST_SECRET_KEY", stripe_key_ref, "STRIPE_TEST_SECRET_KEY")
     _secret(backend, "STRIPE_TEST_WEBHOOK_SECRET", stripe_signer_ref, "STRIPE_TEST_WEBHOOK_SECRET")
     tags = [item for item in original.get("tags", []) if item["key"] != "Purpose"]
-    tags.append({"key": "Purpose", "value": "unified-cognito-stripe-sandbox-acceptance-v1"})
+    tags.append({"key": "Purpose", "value": app_version})
     new_arn = ecs.register_task_definition(**request, tags=tags)["taskDefinition"]["taskDefinitionArn"]
     ecs.update_service(cluster=CLUSTER, service=SERVICE, taskDefinition=new_arn)
     return original_arn, new_arn

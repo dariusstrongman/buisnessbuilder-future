@@ -73,6 +73,25 @@ class StagingServerSecurityTests(unittest.TestCase):
                 staging_server._supervised_stripe_test_admission_enabled(configured=False)
             self.assertTrue(staging_server._supervised_stripe_test_admission_enabled(configured=True))
 
+    def test_pilot_evidence_store_is_private_bucket_only_and_never_claims_scanning(self) -> None:
+        with patch.dict("os.environ", {"PILOT_EVIDENCE_BUCKET": ""}):
+            self.assertIsNone(staging_server._pilot_evidence_store())
+        for environment, bucket in (
+            ("production", staging_server.PILOT_EVIDENCE_BUCKET),
+            ("pilot", "unapproved-evidence-bucket"),
+        ):
+            with patch.object(staging_server, "ENVIRONMENT", environment), patch.dict(
+                "os.environ", {"PILOT_EVIDENCE_BUCKET": bucket}
+            ):
+                with self.assertRaises(RuntimeError):
+                    staging_server._pilot_evidence_store()
+        with patch.object(staging_server, "ENVIRONMENT", "pilot"), patch.dict(
+            "os.environ", {"PILOT_EVIDENCE_BUCKET": staging_server.PILOT_EVIDENCE_BUCKET}
+        ), patch.object(staging_server, "S3ArtifactStore") as store:
+            self.assertIs(staging_server._pilot_evidence_store(), store.return_value)
+            store.assert_called_once_with(bucket=staging_server.PILOT_EVIDENCE_BUCKET,
+                                          allowed_prefix="tenant/")
+
     def test_offline_proof_remains_available_only_with_explicit_opt_in(self) -> None:
         proof = {"status": "passed", "proof": "fixture"}
         with (

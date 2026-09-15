@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from businessbuilder.customer_api.bootstrap import create_postgres_customer_api
+from businessbuilder.access_broker.adapters import S3ArtifactStore
 from businessbuilder.commercial.stripe_test import StripeTestPaymentProvider
 from businessbuilder.identity import cognito_authentication_from_environment
 from businessbuilder.postgres.cloud_proof import get_cloud_proof, run_cloud_proof
@@ -35,6 +36,7 @@ PUBLIC_ASSETS = {
 }
 PROOF_ENVIRONMENTS = frozenset({"development", "local", "test"})
 STRIPE_TEST_ENVIRONMENTS = frozenset({"pilot", "development", "local", "test"})
+PILOT_EVIDENCE_BUCKET = "businessbuilder-staging-artifacts-199949321335-us-east-1"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
@@ -52,6 +54,16 @@ def _supervised_stripe_test_admission_enabled(*, configured: bool) -> bool:
     if environment not in STRIPE_TEST_ENVIRONMENTS or not configured:
         raise RuntimeError("isolated Stripe test checkout requires pilot configuration")
     return True
+
+
+def _pilot_evidence_store() -> S3ArtifactStore | None:
+    evidence_bucket = os.environ.get("PILOT_EVIDENCE_BUCKET", "")
+    if evidence_bucket and (ENVIRONMENT != "pilot" or evidence_bucket != PILOT_EVIDENCE_BUCKET):
+        raise RuntimeError("pilot evidence bucket configuration invalid")
+    return (
+        S3ArtifactStore(bucket=evidence_bucket, allowed_prefix="tenant/")
+        if evidence_bucket else None
+    )
 
 
 def _database_health() -> None:
@@ -439,6 +451,7 @@ if __name__ == "__main__":
         if stripe_key and stripe_webhook else None
     )
     test_admission = _supervised_stripe_test_admission_enabled(configured=payment_provider is not None)
+    evidence_store = _pilot_evidence_store()
     server.customer_api = create_postgres_customer_api(
         signing_key=signing_key,
         founder_authentication_provider=cognito_authentication_from_environment(),
@@ -446,6 +459,8 @@ if __name__ == "__main__":
         allow_supervised_stripe_test_admission=test_admission,
         checkout_success_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_SUCCESS_URL"),
         checkout_cancel_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_CANCEL_URL"),
+        residential_cleaning_evidence_store=evidence_store,
+        # No production malware scanner is configured; uploads stay pending/quarantined.
     )
     print(f"Business Builder staging listening on :{port}", flush=True)
     server.serve_forever()
