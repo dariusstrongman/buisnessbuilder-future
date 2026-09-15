@@ -212,6 +212,41 @@ class ResidentialCleaningJourneyTests(unittest.TestCase):
         )
         self.assertEqual(HTTPStatus.BAD_REQUEST, denied.status)
 
+    def test_running_business_never_becomes_a_fixed_charge_without_an_audit_quote(self) -> None:
+        intake = self._intake("Existing Cleaning Company")
+        intake["starting_point"] = "running"
+        started = self.request(
+            "POST", "/api/v1/pilots/residential-cleaning/intakes",
+            token=self.founder_token,
+            body={"idempotency_key": "existing-cleaning-intake-0001", "intake": intake},
+        )
+        self.assertEqual(HTTPStatus.CREATED, started.status)
+        company_id = started.body["journey"]["company"]["company_id"]
+        approved = self.request(
+            "POST", f"/api/v1/companies/{company_id}/residential-cleaning-pilot/approve",
+            token=self.founder_token,
+            body={"approval_id": started.body["journey"]["scope_commit"]["approval_id"]},
+        )
+        self.assertEqual(HTTPStatus.OK, approved.status)
+        self.assertIsNone(approved.body["journey"]["order"])
+        self.assertFalse(approved.body["journey"]["verification"]["ready"])
+        membership = self.identity_repository.list_user_memberships(self.founder.user_id)[0]
+        self.assertFalse(self.commercial_repository.list_current_orders(membership.tenant_id, company_id))
+        audit_path = f"/api/v1/companies/{company_id}/residential-cleaning-pilot/existing-business-audit"
+        inventory = {"systems": [
+            {"system": "website", "assessment": "keep", "issue": "Current lead form reaches the founder.", "provider_reference": "site_account_0001"},
+            {"system": "crm", "assessment": "missing", "issue": "No CRM is configured yet.", "provider_reference": None},
+        ]}
+        captured = self.request("POST", audit_path, token=self.founder_token, body=inventory)
+        self.assertEqual(HTTPStatus.CREATED, captured.status)
+        self.assertEqual("founder_inventory_pending_operator_scope", captured.body["existing_business_audit"]["data"]["state"])
+        repeated = self.request("POST", audit_path, token=self.founder_token, body=inventory)
+        self.assertEqual(HTTPStatus.CREATED, repeated.status)
+        self.assertEqual(captured.body["existing_business_audit"]["version"], repeated.body["existing_business_audit"]["version"])
+        malformed = self.request("POST", audit_path, token=self.founder_token,
+                                 body={"systems": [{"system": "website", "assessment": "keep", "issue": "ok", "provider_reference": "secret:raw"}]})
+        self.assertEqual(HTTPStatus.BAD_REQUEST, malformed.status)
+
     def request(self, method, path, *, token=None, body=None, headers=None):
         supplied = dict(headers or {})
         if token:

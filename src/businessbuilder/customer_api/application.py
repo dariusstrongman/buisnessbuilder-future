@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import base64
 import binascii
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,9 @@ from typing import Any, Callable, Mapping
 
 from businessbuilder.build_room.projection import ScopedEnvelope, project_build_room
 from businessbuilder.commercial import Amount, CommercialService
+from businessbuilder.commercial.models import CheckoutStatus, OrderStatus
+from businessbuilder.commercial.pricing import OfferCode, public_pricing
+from businessbuilder.commercial.repository import CommercialConflict
 from businessbuilder.commercial.repository import CommercialRepository
 from businessbuilder.company_brain import (
     Company,
@@ -47,6 +50,12 @@ _APPROVAL_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/approvals/([A-Za-z0-9_-]{1,128})$"
 )
 _ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
+_ORDER_CHECKOUT_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/checkout$")
+_ORDER_OFFER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/offer$")
+_STRIPE_WEBHOOK_ROUTE = "/api/v1/payment-webhooks/stripe"
+_EXISTING_AUDIT_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/existing-business-audit$"
+)
 _PROVIDER_CONNECTIONS_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/provider-connections$"
 )
@@ -160,6 +169,10 @@ class CustomerApi:
         live_canary_readiness=None,
         residential_cleaning=None,
         founder_authentication=None,
+        payment_provider=None,
+        payment_webhooks=None,
+        checkout_success_url: str | None = None,
+        checkout_cancel_url: str | None = None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -179,6 +192,10 @@ class CustomerApi:
         self.live_canary_readiness = live_canary_readiness
         self.residential_cleaning = residential_cleaning
         self.founder_authentication = founder_authentication
+        self.payment_provider = payment_provider
+        self.payment_webhooks = payment_webhooks
+        self.checkout_success_url = checkout_success_url
+        self.checkout_cancel_url = checkout_cancel_url
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -213,6 +230,19 @@ class CustomerApi:
         raw_token: str | None = None
         actor_id = "unknown"
         try:
+            if path == "/api/v1/pricing":
+                self._method(method, "GET")
+                return ApiResponse(HTTPStatus.OK, {"offers": public_pricing()})
+            if path == _STRIPE_WEBHOOK_ROUTE:
+                self._method(method, "POST")
+                if self.payment_webhooks is None or not isinstance(body, bytes):
+                    raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+                signature = lowered.get("stripe-signature", "")
+                try:
+                    applied = self.payment_webhooks.handle(signature, body)
+                except ValueError:
+                    raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_webhook", "webhook authenticity failed") from None
+                return ApiResponse(HTTPStatus.OK, {"received": True, "applied": applied})
             if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
                 self._method(method, "POST")
                 if self.founder_authentication is None:
@@ -333,6 +363,11 @@ class CustomerApi:
                 HTTPStatus.FORBIDDEN,
                 {"status": "error", "error": "forbidden", "message": "operation is not permitted"},
             )
+        except CommercialConflict:
+            return ApiResponse(
+                HTTPStatus.CONFLICT,
+                {"status": "error", "error": "commercial_conflict", "message": "commercial state conflicts with this request"},
+            )
 
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
         pilot_grant = _PILOT_SUPPORT_GRANT_ROUTE.fullmatch(path)
@@ -438,6 +473,29 @@ class CustomerApi:
             )
             journey["verification"] = self._readiness(scoped)
             return ApiResponse(HTTPStatus.CREATED, {"journey": journey})
+
+        match = _EXISTING_AUDIT_ROUTE.fullmatch(path)
+        if match:
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            principal = self._company_principal(
+                token, user.user_id, match.group(1), support,
+                Permission.VIEW_COMPANY_STATE, request_id, correlation_id,
+            )
+            if support or principal.role is not Role.OWNER:
+                self._deny(principal, Permission.VIEW_COMPANY_STATE, "founder audit access denied", request_id, correlation_id)
+            if method == "GET":
+                journey = self.residential_cleaning.project(principal)
+                return ApiResponse(HTTPStatus.OK, {"existing_business_audit": journey["existing_business_audit"]})
+            self._method(method, "GET", "POST")
+            values = self._object(body, required={"systems"}, allowed={"systems"})
+            try:
+                audit = self.residential_cleaning.capture_existing_business_audit(
+                    principal, systems=values["systems"]
+                )
+            except RuntimeError:
+                raise ApiFailure(HTTPStatus.CONFLICT, "audit_conflict", "audit inventory conflicts with persisted state") from None
+            return ApiResponse(HTTPStatus.CREATED, {"existing_business_audit": audit})
 
         if path == "/api/v1/provider-connections/oauth/callback":
             self._method(method, "POST")
@@ -1139,6 +1197,66 @@ class CustomerApi:
             )
             return ApiResponse(HTTPStatus.OK, {"order": self._order(order)})
 
+        match = _ORDER_OFFER_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "POST")
+            values = self._object(body, required={"offer_code"}, allowed={"offer_code"})
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.AUTHORIZE_SPEND,
+                request_id, correlation_id,
+            )
+            if self.residential_cleaning is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            pilot = self.residential_cleaning.project(principal)
+            if pilot["scope_commit"]["approval_state"] != "granted" or (
+                not pilot["order"] or pilot["order"]["order_id"] != match.group(1)
+            ):
+                self._deny(principal, Permission.AUTHORIZE_SPEND, "unapproved order scope", request_id, correlation_id)
+            offer = OfferCode(self._short_string(values["offer_code"], 80))
+            order = self.commercial.select_fixed_offer(self._context(principal), match.group(1), offer)
+            return ApiResponse(HTTPStatus.OK, {"order": self._order(order)})
+
+        match = _ORDER_CHECKOUT_ROUTE.fullmatch(path)
+        if match:
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.AUTHORIZE_SPEND,
+                request_id, correlation_id,
+            )
+            order = self.commercial_repository.get_order(
+                principal.tenant_id, principal.company_id or "", match.group(1)
+            )
+            if order.user_id != principal.user_id:
+                self._deny(principal, Permission.AUTHORIZE_SPEND, "order owner mismatch", request_id, correlation_id)
+            if method == "GET":
+                checkout = self.commercial_repository.get_checkout(
+                    principal.tenant_id, principal.company_id or "", order.checkout_intent_id
+                ) if order.checkout_intent_id else None
+                return ApiResponse(HTTPStatus.OK, {"order": self._order(order), "checkout": self._checkout(checkout)})
+            self._method(method, "GET", "POST")
+            if self.payment_provider is None or not self.checkout_success_url or not self.checkout_cancel_url:
+                raise ApiFailure(HTTPStatus.SERVICE_UNAVAILABLE, "checkout_disabled", "supervised checkout is not configured")
+            values = self._object(body, required={"idempotency_key"}, allowed={"idempotency_key"})
+            key = self._short_string(values["idempotency_key"], 160)
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", key):
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "invalid checkout retry key")
+            if order.offer_code is None or order.total is None:
+                raise ApiFailure(HTTPStatus.CONFLICT, "order_unpriced", "approved priced order required")
+            checkout = self.commercial.create_checkout(self._context(principal), order.order_id, key)
+            if checkout.status is not CheckoutStatus.OPEN:
+                raise ApiFailure(HTTPStatus.CONFLICT, "checkout_closed", "checkout cannot be resumed")
+            if not checkout.provider_ref:
+                provider_ref, redirect_url = self.payment_provider.open_checkout(
+                    order=self.commercial_repository.get_order(principal.tenant_id, principal.company_id or "", order.order_id),
+                    idempotency_key=f"bb:{order.order_id}:{key}",
+                    success_url=self.checkout_success_url,
+                    cancel_url=self.checkout_cancel_url,
+                )
+                with self.commercial_repository.transaction():
+                    checkout = replace(checkout, provider_ref=provider_ref, redirect_url=redirect_url)
+                    self.commercial_repository.save_checkout(checkout)
+            order = self.commercial_repository.get_order(principal.tenant_id, principal.company_id or "", order.order_id)
+            return ApiResponse(HTTPStatus.CREATED, {"order": self._order(order), "checkout": self._checkout(checkout)})
+
         if path in {"/api/v1/subscriptions", "/api/v1/entitlements"}:
             self._method(method, "GET")
             permission = Permission.VIEW_BILLING if path.endswith("subscriptions") else Permission.VIEW_COMPANY_STATE
@@ -1179,6 +1297,16 @@ class CustomerApi:
     @staticmethod
     def allowed_methods(path: str) -> tuple[str, ...]:
         """Return only methods supported by a recognized customer route."""
+        if path == "/api/v1/pricing":
+            return ("GET",)
+        if path == _STRIPE_WEBHOOK_ROUTE:
+            return ("POST",)
+        if _ORDER_CHECKOUT_ROUTE.fullmatch(path):
+            return ("GET", "POST")
+        if _ORDER_OFFER_ROUTE.fullmatch(path):
+            return ("POST",)
+        if _EXISTING_AUDIT_ROUTE.fullmatch(path):
+            return ("GET", "POST")
         if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
             return ("POST",)
         if path == _CLEANING_PILOT_START_ROUTE:
@@ -1512,6 +1640,23 @@ class CustomerApi:
             "created_at": CustomerApi._time(order.created_at),
             "updated_at": CustomerApi._time(order.updated_at),
             "version": order.version,
+            "offer_code": order.offer_code,
+            "quote_id": order.quote_id,
+            "payment_eligibility": order.eligibility.value,
+            "eligible_at": CustomerApi._time(order.eligible_at),
+            "tax_disposition": order.tax_disposition.value,
+        }
+
+    @staticmethod
+    def _checkout(checkout):
+        if checkout is None:
+            return None
+        return {
+            "checkout_intent_id": checkout.checkout_intent_id,
+            "status": checkout.status.value,
+            "retry_key": checkout.idempotency_key if checkout.status is CheckoutStatus.OPEN else None,
+            "redirect_url": checkout.redirect_url if checkout.status is CheckoutStatus.OPEN else None,
+            "created_at": CustomerApi._time(checkout.created_at),
         }
 
     @staticmethod
@@ -1771,6 +1916,25 @@ class CustomerApi:
             events=(),
             handoff=ScopedEnvelope(tenant_id, company_id, self._handoff(principal)),
         ).to_dict()
+        try:
+            self.commercial.authorization.require(
+                self._context(principal), Permission.VIEW_BILLING, at=self.clock()
+            )
+            orders = self.commercial_repository.list_current_orders(tenant_id, company_id)
+            projected["commercial"] = {
+                "authority": "commercial",
+                "orders": [
+                    {"order_id": item.order_id, "status": item.status.value,
+                     "offer_code": item.offer_code, "payment_eligibility": item.eligibility.value}
+                    for item in orders
+                ],
+                "active_entitlements": sum(
+                    item.status.value == "active"
+                    for item in self.commercial_repository.get_current_entitlement_grants(tenant_id, company_id)
+                ),
+            }
+        except PermissionError:
+            projected["commercial"] = None
         return self._remove_internal_scope(projected)
 
     @staticmethod

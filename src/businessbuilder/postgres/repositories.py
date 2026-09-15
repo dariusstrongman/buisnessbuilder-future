@@ -26,6 +26,7 @@ from businessbuilder.ai_workforce.repository import InMemoryWorkforceRepository
 from businessbuilder.commercial.models import (
     CancellationRecord,
     CheckoutIntent,
+    CommercialQuote,
     CommercialEvent,
     EntitlementGrant,
     Order,
@@ -41,6 +42,7 @@ from businessbuilder.commercial.models import (
 )
 from businessbuilder.commercial.repository import (
     CommercialConflict,
+    CommercialNotFound,
     InMemoryCommercialRepository,
     _COMMERCIAL_TYPES,
 )
@@ -306,6 +308,10 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     self.orders.setdefault(
                         (value.tenant_id, value.company_id, value.order_id), []
                     ).append(value)
+                elif kind == "quote":
+                    self.quotes.setdefault(
+                        (value.tenant_id, value.company_id, value.quote_id), []
+                    ).append(value)
                 elif kind == "checkout":
                     self.checkouts[
                         (value.tenant_id, value.company_id, value.checkout_intent_id)
@@ -398,19 +404,70 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
             order.company_id,
         )
 
-    def save_checkout(self, checkout: CheckoutIntent) -> None:
-        super().save_checkout(checkout)
+    def append_quote(self, quote: CommercialQuote) -> None:
+        super().append_quote(quote)
         self._insert(
-            "checkout",
-            self._scope(
-                checkout.tenant_id, checkout.company_id, checkout.checkout_intent_id
-            ),
-            1,
-            checkout,
-            checkout.tenant_id,
-            checkout.company_id,
-            replace_row=True,
+            "quote",
+            self._scope(quote.tenant_id, quote.company_id, quote.quote_id),
+            quote.version,
+            quote,
+            quote.tenant_id,
+            quote.company_id,
         )
+
+    def save_checkout(self, checkout: CheckoutIntent) -> None:
+        with self.transaction():
+            super().save_checkout(checkout)
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO bb_commercial_records(
+                        kind, scope_key, version, tenant_id, company_id, body,
+                        checkout_idempotency_key, checkout_provider_ref
+                    ) VALUES ('checkout', %s, 1, %s, %s, %s, %s, %s)
+                    ON CONFLICT (kind, scope_key, version) DO UPDATE SET
+                        body=EXCLUDED.body,
+                        checkout_provider_ref=EXCLUDED.checkout_provider_ref
+                    WHERE bb_commercial_records.checkout_idempotency_key=EXCLUDED.checkout_idempotency_key
+                      AND (bb_commercial_records.checkout_provider_ref IS NULL
+                           OR bb_commercial_records.checkout_provider_ref=EXCLUDED.checkout_provider_ref)
+                    RETURNING scope_key
+                    """,
+                    (
+                        self._scope(checkout.tenant_id, checkout.company_id, checkout.checkout_intent_id),
+                        checkout.tenant_id, checkout.company_id, encode_record(checkout),
+                        checkout.idempotency_key, checkout.provider_ref,
+                    ),
+                )
+                if cursor.fetchone() is None:
+                    raise CommercialConflict("provider checkout reference cannot change")
+
+    def get_checkout_by_idempotency(self, tenant_id: str, company_id: str, key: str) -> CheckoutIntent | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT body FROM bb_commercial_records WHERE kind='checkout'
+                   AND tenant_id=%s AND company_id=%s AND checkout_idempotency_key=%s""",
+                (tenant_id, company_id, key),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        checkout = decode_record(row["body"], _COMMERCIAL_TYPES)
+        self.checkouts[(checkout.tenant_id, checkout.company_id, checkout.checkout_intent_id)] = checkout
+        return checkout
+
+    def get_checkout_by_provider_ref(self, provider_ref: str) -> CheckoutIntent:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_commercial_records WHERE kind='checkout' AND checkout_provider_ref=%s",
+                (provider_ref,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise CommercialNotFound("provider checkout not mapped")
+        checkout = decode_record(row["body"], _COMMERCIAL_TYPES)
+        self.checkouts[(checkout.tenant_id, checkout.company_id, checkout.checkout_intent_id)] = checkout
+        return checkout
 
     def save_payment(self, payment: PaymentIntentRef) -> None:
         super().save_payment(payment)

@@ -11,6 +11,8 @@ class ProductCode(StrEnum):
     BUILD_WEBSITE = "BUILD_WEBSITE"
     BUILD_BUSINESS = "BUILD_BUSINESS"
     BUILD_AND_RUN = "BUILD_AND_RUN"
+    EXISTING_BUSINESS_RUN = "EXISTING_BUSINESS_RUN"
+    EXISTING_BUSINESS_ONBOARDING = "EXISTING_BUSINESS_ONBOARDING"
 
 
 class BillingMode(StrEnum):
@@ -57,6 +59,24 @@ class SubscriptionStatus(StrEnum):
     CANCEL_AT_PERIOD_END = "cancel_at_period_end"
     CANCELED = "canceled"
     SUSPENDED = "suspended"
+
+
+class PaymentEligibility(StrEnum):
+    PAY_NOW_ELIGIBLE = "PAY_NOW_ELIGIBLE"
+    PAYMENT_DELAY_REQUIRED = "PAYMENT_DELAY_REQUIRED"
+
+
+class TaxDisposition(StrEnum):
+    TAXABLE = "taxable"
+    NON_TAXABLE = "non_taxable"
+    PROVIDER_CALCULATED = "provider_calculated"
+    MANUAL_REVIEW = "manual_review"
+
+
+class QuoteStatus(StrEnum):
+    PROPOSED = "proposed"
+    APPROVED = "approved"
+    SUPERSEDED = "superseded"
 
 
 class OutboxStatus(StrEnum):
@@ -168,6 +188,29 @@ class Order:
     checkout_intent_id: str | None = None
     payment_intent_ref: str | None = None
     total: Amount | None = None
+    offer_code: str | None = None
+    quote_id: str | None = None
+    eligibility: PaymentEligibility = PaymentEligibility.PAYMENT_DELAY_REQUIRED
+    eligible_at: datetime | None = None
+    tax_disposition: TaxDisposition = TaxDisposition.MANUAL_REVIEW
+
+
+@dataclass(frozen=True, slots=True)
+class CommercialQuote:
+    quote_id: str
+    tenant_id: str
+    company_id: str
+    order_id: str
+    recommendation_digest: str
+    audit_ref: str
+    upfront: Amount
+    monthly: Amount
+    status: QuoteStatus
+    created_at: datetime
+    expires_at: datetime
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    version: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +225,7 @@ class CheckoutIntent:
     idempotency_key: str
     created_at: datetime
     expires_at: datetime | None = None
+    redirect_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +503,7 @@ class NormalizedBillingEvent:
 ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.DRAFT: frozenset({OrderStatus.PENDING_PAYMENT, OrderStatus.CANCELED}),
     OrderStatus.PENDING_PAYMENT: frozenset({OrderStatus.PAID, OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELED}),
-    OrderStatus.PAYMENT_FAILED: frozenset({OrderStatus.PAID, OrderStatus.CANCELED}),
+    OrderStatus.PAYMENT_FAILED: frozenset({OrderStatus.PENDING_PAYMENT, OrderStatus.PAID, OrderStatus.CANCELED}),
     OrderStatus.PAID: frozenset({OrderStatus.FULFILLMENT_PENDING, OrderStatus.CANCELED, OrderStatus.REFUNDED, OrderStatus.PARTIALLY_REFUNDED}),
     OrderStatus.FULFILLMENT_PENDING: frozenset({OrderStatus.ACTIVE, OrderStatus.CANCELED, OrderStatus.REFUNDED, OrderStatus.PARTIALLY_REFUNDED}),
     OrderStatus.ACTIVE: frozenset({OrderStatus.COMPLETED, OrderStatus.CANCELED, OrderStatus.REFUNDED, OrderStatus.PARTIALLY_REFUNDED}),

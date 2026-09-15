@@ -48,6 +48,14 @@ PACKAGE_FEATURES: dict[ProductCode, tuple[str, ...]] = {
         "inbox.autonomous", "monitoring.recurring", "outreach.scheduled",
         "optimization.ongoing", "support.managed",
     ),
+    ProductCode.EXISTING_BUSINESS_RUN: (
+        "company.read_export", "artifacts.read_export", "ai_workforce.execute",
+        "inbox.autonomous", "monitoring.recurring", "outreach.scheduled",
+        "optimization.ongoing", "support.managed",
+    ),
+    ProductCode.EXISTING_BUSINESS_ONBOARDING: (
+        "company.read_export", "artifacts.read_export",
+    ),
 }
 
 
@@ -55,12 +63,14 @@ DISPLAY_NAMES = {
     ProductCode.BUILD_WEBSITE: "Build My Professional Website",
     ProductCode.BUILD_BUSINESS: "Build My Business",
     ProductCode.BUILD_AND_RUN: "Build & Run My Business",
+    ProductCode.EXISTING_BUSINESS_RUN: "Existing Business + Build & Run",
+    ProductCode.EXISTING_BUSINESS_ONBOARDING: "Existing Business Audit Onboarding",
 }
 
 
 def product_version(code: ProductCode, effective_at: datetime) -> ProductVersion:
     feature_codes = PACKAGE_FEATURES[code]
-    billing_mode = BillingMode.RECURRING if code is ProductCode.BUILD_AND_RUN else BillingMode.ONE_TIME
+    billing_mode = BillingMode.RECURRING if code in {ProductCode.BUILD_AND_RUN, ProductCode.EXISTING_BUSINESS_RUN} else BillingMode.ONE_TIME
     package = Package(code, DISPLAY_NAMES[code], billing_mode, feature_codes, price_ref=None)
     return ProductVersion(
         f"product_version_{code.value.lower()}_v1", code, 1, package,

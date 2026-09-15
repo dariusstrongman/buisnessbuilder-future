@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 9
+MIGRATION_VERSION = 10
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -425,6 +425,20 @@ DROP TRIGGER IF EXISTS bb_ai_workforce_audit_append_only ON bb_ai_workforce_audi
 CREATE TRIGGER bb_ai_workforce_audit_append_only
     BEFORE UPDATE OR DELETE ON bb_ai_workforce_audit_events
     FOR EACH ROW EXECUTE FUNCTION bb_reject_append_only_mutation();
+
+-- Checkout identities live in the existing Commercial ledger, not a second store.
+ALTER TABLE bb_commercial_records ADD COLUMN IF NOT EXISTS checkout_idempotency_key TEXT;
+ALTER TABLE bb_commercial_records ADD COLUMN IF NOT EXISTS checkout_provider_ref TEXT;
+UPDATE bb_commercial_records
+   SET checkout_idempotency_key = body::jsonb -> 'fields' ->> 'idempotency_key',
+       checkout_provider_ref = body::jsonb -> 'fields' ->> 'provider_ref'
+ WHERE kind = 'checkout' AND checkout_idempotency_key IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS bb_checkout_scope_idempotency
+    ON bb_commercial_records (tenant_id, company_id, checkout_idempotency_key)
+    WHERE kind = 'checkout' AND checkout_idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS bb_checkout_provider_ref
+    ON bb_commercial_records (checkout_provider_ref)
+    WHERE kind = 'checkout' AND checkout_provider_ref IS NOT NULL;
 """
 
 

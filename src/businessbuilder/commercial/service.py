@@ -16,6 +16,7 @@ from .models import (
     CancellationTiming,
     CheckoutIntent,
     CheckoutStatus,
+    CommercialQuote,
     CommercialEvent,
     EntitlementClass,
     EntitlementGrant,
@@ -28,6 +29,9 @@ from .models import (
     OrderAuditEvent,
     OrderItem,
     OrderStatus,
+    PaymentEligibility,
+    QuoteStatus,
+    TaxDisposition,
     PaymentIntentRef,
     ProductCode,
     RefundKind,
@@ -42,11 +46,13 @@ from .models import (
 from .ports import CommercialEventSink
 from .outbox import CommercialOutboxDispatcher
 from .repository import CommercialConflict, CommercialRepository
+from .pricing import FOUNDING_PRICES, OfferCode, PriceKind
 
 
 SUPPORTED_BILLING_EVENTS = frozenset(
     {
         "billing.checkout.completed",
+        "billing.checkout.expired",
         "billing.payment.succeeded",
         "billing.payment.failed",
         "billing.subscription.created",
@@ -111,11 +117,23 @@ class CommercialService:
         *,
         amount: Amount | None = None,
         order_id: str | None = None,
+        offer_code: OfferCode | None = None,
     ) -> Order:
         self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
         if context.company_id is None:
             raise ValueError("company_id required for a commercial order")
         version = self.repository.get_product_version(product_version_id)
+        if offer_code is not None:
+            price = FOUNDING_PRICES[offer_code]
+            if price.kind is PriceKind.QUOTE_REQUIRED:
+                raise CommercialConflict("existing-business order requires an approved quote")
+            expected = {
+                OfferCode.WEBSITE: ProductCode.BUILD_WEBSITE,
+                OfferCode.BUSINESS: ProductCode.BUILD_BUSINESS,
+            }
+            if offer_code not in expected or version.product_code is not expected[offer_code]:
+                raise CommercialConflict("canonical offer does not match its product version")
+            amount = Amount(price.currency, price.upfront_minor or 0)
         now = self.clock()
         item = OrderItem(
             self.id_factory("order_item"), version.product_code, product_version_id,
@@ -124,10 +142,123 @@ class CommercialService:
         order = Order(
             order_id or self.id_factory("order"), context.tenant_id, context.actor_user_id,
             context.company_id, OrderStatus.DRAFT, (item,), now, now, total=amount,
+            offer_code=offer_code.value if offer_code else None,
         )
         self.repository.append_order(order)
         self._audit_order(order, context.actor_user_id, "order.created", "Customer created order")
         return order
+
+    @_transactional
+    def select_fixed_offer(self, context: AuthorizationContext, order_id: str, offer_code: OfferCode) -> Order:
+        """Reprice only an uncharged, approved new-business order."""
+        self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
+        if context.company_id is None:
+            raise PermissionError("company scope required")
+        order = self.repository.get_order(context.tenant_id, context.company_id, order_id)
+        if order.user_id != context.actor_user_id or order.status is not OrderStatus.DRAFT:
+            raise CommercialConflict("order is not an owner-controlled draft")
+        if order.items[0].product_code is not ProductCode.BUILD_BUSINESS or offer_code not in {OfferCode.BUSINESS, OfferCode.BUSINESS_RUN}:
+            raise CommercialConflict("offer does not match approved new-business scope")
+        if order.offer_code == offer_code.value:
+            return order
+        price = FOUNDING_PRICES[offer_code]
+        upfront = Amount("USD", price.upfront_minor or 0)
+        build_item = replace(order.items[0], unit_amount=upfront)
+        items = (build_item,)
+        if offer_code is OfferCode.BUSINESS_RUN:
+            version_id = "product_version_build_and_run_v1"
+            version = self.repository.get_product_version(version_id)
+            items += (OrderItem(
+                self.id_factory("order_item"), version.product_code, version_id,
+                version.package.display_name, BillingMode.RECURRING, 1,
+                Amount("USD", price.monthly_minor or 0),
+            ),)
+        first_due = Amount("USD", upfront.minor_units + (price.monthly_minor or 0))
+        changed = replace(
+            order, items=items, total=first_due, offer_code=offer_code.value,
+            version=order.version + 1, updated_at=self.clock(),
+        )
+        self.repository.append_order(changed)
+        self._audit_order(changed, context.actor_user_id, "order.offer_selected", "Founder selected a canonical fixed offer")
+        return changed
+
+    @_transactional
+    def create_existing_business_order(
+        self, context: AuthorizationContext, *, audit_ref: str,
+        recommendation_digest: str, order_id: str | None = None,
+    ) -> Order:
+        """Only a recorded Existing Business Audit may lead to a scoped draft."""
+        self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
+        if context.company_id is None or not audit_ref or len(recommendation_digest) != 64:
+            raise CommercialConflict("an audit-backed scope is required")
+        now = self.clock()
+        setup_version_id = "product_version_existing_business_onboarding_v1"
+        run_version_id = "product_version_existing_business_run_v1"
+        setup_version = self.repository.get_product_version(setup_version_id)
+        run_version = self.repository.get_product_version(run_version_id)
+        order = Order(
+            order_id or self.id_factory("order"), context.tenant_id, context.actor_user_id,
+            context.company_id, OrderStatus.DRAFT,
+            (
+                OrderItem(self.id_factory("order_item"), setup_version.product_code,
+                          setup_version_id, setup_version.package.display_name,
+                          BillingMode.ONE_TIME, 1, None),
+                OrderItem(self.id_factory("order_item"), run_version.product_code,
+                          run_version_id, run_version.package.display_name,
+                          BillingMode.RECURRING, 1, Amount("USD", 29900)),
+            ), now, now, offer_code=OfferCode.EXISTING_RUN.value,
+        )
+        self.repository.append_order(order)
+        self._audit_order(order, context.actor_user_id, "order.audit_scope_recorded", "Existing Business Audit scope recorded")
+        return order
+
+    @_transactional
+    def create_existing_business_quote(
+        self, *, tenant_id: str, company_id: str, order_id: str,
+        audit_ref: str, recommendation_digest: str, upfront_minor: int,
+        expires_at: datetime,
+    ) -> CommercialQuote:
+        """Internal scoped quote preparation; an audit and digest are mandatory."""
+        order = self.repository.get_order(tenant_id, company_id, order_id)
+        if order.status is not OrderStatus.DRAFT or not audit_ref or len(recommendation_digest) != 64:
+            raise CommercialConflict("a draft and digest-bound audit are required")
+        if order.offer_code != OfferCode.EXISTING_RUN.value:
+            raise CommercialConflict("quote requires the distinct existing-business package")
+        floor = FOUNDING_PRICES[OfferCode.EXISTING_RUN].floor_minor or 0
+        if upfront_minor < floor or expires_at <= self.clock():
+            raise CommercialConflict("quote amount or expiration is invalid")
+        quote = CommercialQuote(
+            self.id_factory("quote"), tenant_id, company_id, order_id,
+            recommendation_digest, audit_ref, Amount("USD", upfront_minor),
+            Amount("USD", 29900), QuoteStatus.PROPOSED,
+            self.clock(), expires_at,
+        )
+        self.repository.append_quote(quote)
+        self._audit_order(order, "commercial_operator", "quote.proposed", "Audit-backed onboarding quote proposed")
+        return quote
+
+    @_transactional
+    def approve_quote(self, context: AuthorizationContext, quote_id: str, recommendation_digest: str) -> CommercialQuote:
+        self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
+        if context.company_id is None:
+            raise PermissionError("company scope required")
+        quote = self.repository.get_quote(context.tenant_id, context.company_id, quote_id)
+        order = self.repository.get_order(context.tenant_id, context.company_id, quote.order_id)
+        if order.user_id != context.actor_user_id or quote.status is not QuoteStatus.PROPOSED:
+            raise CommercialConflict("quote is not approvable")
+        if quote.expires_at <= self.clock() or quote.recommendation_digest != recommendation_digest:
+            raise CommercialConflict("stale or mismatched quote")
+        approved = replace(quote, status=QuoteStatus.APPROVED, approved_by=context.actor_user_id,
+                           approved_at=self.clock(), version=quote.version + 1)
+        self.repository.append_quote(approved)
+        setup_item = replace(order.items[0], unit_amount=quote.upfront)
+        changed = replace(order, quote_id=quote_id,
+                          items=(setup_item, *order.items[1:]),
+                          total=Amount("USD", quote.upfront.minor_units + quote.monthly.minor_units),
+                          version=order.version + 1, updated_at=self.clock())
+        self.repository.append_order(changed)
+        self._audit_order(changed, context.actor_user_id, "quote.approved", "Founder approved exact quote digest")
+        return approved
 
     @_transactional
     def create_checkout(
@@ -137,12 +268,29 @@ class CommercialService:
         self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
         if context.company_id is None:
             raise ValueError("company_id required")
-        existing = self.repository.get_checkout_by_idempotency(context.tenant_id, context.company_id, idempotency_key)
-        if existing:
-            return existing
         order = self.repository.get_order(context.tenant_id, context.company_id, order_id)
         if order.user_id != context.actor_user_id:
             raise PermissionError("order owner mismatch")
+        existing = self.repository.get_checkout_by_idempotency(context.tenant_id, context.company_id, idempotency_key)
+        if existing:
+            if existing.order_id != order_id:
+                raise CommercialConflict("checkout idempotency key belongs to another order")
+            return existing
+        if order.offer_code is not None and order.total is None:
+            raise CommercialConflict("canonical priced order required")
+        if order.offer_code == OfferCode.EXISTING_RUN.value:
+            if not order.quote_id:
+                raise CommercialConflict("existing-business quote required")
+            quote = self.repository.get_quote(order.tenant_id, order.company_id, order.quote_id)
+            quoted_first_charge = Amount("USD", quote.upfront.minor_units + quote.monthly.minor_units)
+            if quote.status is not QuoteStatus.APPROVED or quote.expires_at <= self.clock() or quoted_first_charge != order.total:
+                raise CommercialConflict("approved, current quote required")
+        if order.offer_code is not None and (order.eligibility is not PaymentEligibility.PAY_NOW_ELIGIBLE or (
+            order.eligible_at is not None and order.eligible_at > self.clock()
+        )):
+            raise CommercialConflict("payment eligibility delay is active")
+        if order.offer_code is not None and order.tax_disposition is TaxDisposition.MANUAL_REVIEW:
+            raise CommercialConflict("tax treatment awaits authorized review")
         order = self._transition_order(order, OrderStatus.PENDING_PAYMENT, context.actor_user_id, "Checkout opened")
         checkout = CheckoutIntent(
             self.id_factory("checkout"), order.tenant_id, order.user_id, order.company_id,
@@ -152,6 +300,32 @@ class CommercialService:
         linked = replace(order, checkout_intent_id=checkout.checkout_intent_id, version=order.version + 1, updated_at=self.clock())
         self.repository.append_order(linked)
         return checkout
+
+    @_transactional
+    def record_payment_readiness(
+        self, *, tenant_id: str, company_id: str, order_id: str,
+        eligibility: PaymentEligibility, eligible_at: datetime | None,
+        tax_disposition: TaxDisposition, review_ref: str,
+    ) -> Order:
+        """Internal supervised decision, not callable from the customer API."""
+        if not review_ref or len(review_ref) > 160:
+            raise CommercialConflict("supervised decision reference required")
+        order = self.repository.get_order(tenant_id, company_id, order_id)
+        if order.status is not OrderStatus.DRAFT or not order.offer_code or order.total is None:
+            raise CommercialConflict("priced draft required")
+        if order.offer_code == OfferCode.EXISTING_RUN.value:
+            if not order.quote_id or self.repository.get_quote(tenant_id, company_id, order.quote_id).status is not QuoteStatus.APPROVED:
+                raise CommercialConflict("founder-approved quote required")
+        if eligibility is PaymentEligibility.PAY_NOW_ELIGIBLE and eligible_at is not None and eligible_at > self.clock():
+            raise CommercialConflict("future eligibility cannot be pay-now")
+        if tax_disposition is TaxDisposition.MANUAL_REVIEW and eligibility is PaymentEligibility.PAY_NOW_ELIGIBLE:
+            raise CommercialConflict("manual tax review cannot be pay-now")
+        changed = replace(order, eligibility=eligibility, eligible_at=eligible_at,
+                          tax_disposition=tax_disposition, version=order.version + 1,
+                          updated_at=self.clock())
+        self.repository.append_order(changed)
+        self._audit_order(changed, "commercial_operator", "order.eligibility_reviewed", review_ref)
+        return changed
 
     def handle_billing_event(self, event: NormalizedBillingEvent) -> bool:
         """Apply one normalized event exactly once; raw provider payloads are prohibited."""
@@ -166,6 +340,8 @@ class CommercialService:
             if should_process:
                 if event.event_type == "billing.checkout.completed":
                     self._checkout_completed(event)
+                elif event.event_type == "billing.checkout.expired":
+                    self._checkout_expired(event)
                 elif event.event_type == "billing.payment.succeeded":
                     self._payment_succeeded(event)
                 elif event.event_type == "billing.payment.failed":
@@ -332,11 +508,37 @@ class CommercialService:
             self.repository.save_checkout(replace(checkout, status=CheckoutStatus.COMPLETED, provider_ref=checkout.provider_ref or event.provider_event_ref))
         self._emit_from_billing("checkout.completed", event, {"order_id": checkout.order_id, "checkout_intent_id": checkout.checkout_intent_id})
 
+    def _checkout_expired(self, event: NormalizedBillingEvent) -> None:
+        if not event.checkout_intent_id:
+            raise ValueError("checkout expiry requires checkout_intent_id")
+        checkout = self.repository.get_checkout(event.tenant_id, event.company_id, event.checkout_intent_id)
+        self._assert_event_owner(event, checkout.user_id)
+        if checkout.status is CheckoutStatus.OPEN:
+            self.repository.save_checkout(replace(checkout, status=CheckoutStatus.EXPIRED))
+        order = self.repository.get_order(event.tenant_id, event.company_id, checkout.order_id)
+        if order.status is OrderStatus.PENDING_PAYMENT:
+            self._transition_order(order, OrderStatus.CANCELED, event.provider, "Provider checkout expired")
+
     def _payment_succeeded(self, event: NormalizedBillingEvent) -> None:
         if not event.order_id or not event.payment_provider_ref:
             raise ValueError("payment success requires order and payment references")
         order = self.repository.get_order(event.tenant_id, event.company_id, event.order_id)
         self._assert_event_owner(event, order.user_id)
+        if event.amount is not None and order.total is not None and (
+            event.amount.currency != order.total.currency
+            or (
+                event.amount.minor_units < order.total.minor_units
+                if order.tax_disposition is TaxDisposition.PROVIDER_CALCULATED
+                else event.amount != order.total
+            )
+        ):
+            raise CommercialConflict("provider amount does not match priced order")
+        if event.provider == "stripe":
+            if not event.checkout_intent_id or event.checkout_intent_id != order.checkout_intent_id:
+                raise CommercialConflict("Stripe payment is not bound to this checkout")
+            checkout = self.repository.get_checkout(event.tenant_id, event.company_id, event.checkout_intent_id)
+            if checkout.order_id != order.order_id or not checkout.provider_ref or checkout.status is not CheckoutStatus.COMPLETED:
+                raise CommercialConflict("Stripe checkout mapping is absent")
         existing_payment = self.repository.get_payment_for_order(event.tenant_id, event.company_id, event.order_id)
         if existing_payment and existing_payment.provider_ref == event.payment_provider_ref and order.status in {
             OrderStatus.PAID, OrderStatus.FULFILLMENT_PENDING, OrderStatus.ACTIVE,
@@ -357,6 +559,9 @@ class CommercialService:
             version = self.repository.get_product_version(item.product_version_id)
             if version.package.billing_mode is BillingMode.ONE_TIME:
                 self._grant_entitlements(pending, version, source_subscription_id=None)
+        for subscription in self.repository.list_current_subscriptions(order.tenant_id, order.company_id):
+            if subscription.order_id == order.order_id and subscription.status in {SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING}:
+                self._grant_entitlements(pending, self.repository.get_product_version(subscription.plan.product_version_id), subscription.subscription_id)
         self._emit_from_billing("order.paid", event, {"order_id": order.order_id, "payment_ref_id": payment.payment_ref_id})
         self._emit_from_billing("commercial.fulfillment.eligible", event, {"order_id": order.order_id, "product_codes": [item.product_code.value for item in order.items]})
 
@@ -407,7 +612,9 @@ class CommercialService:
         )
         self.repository.append_subscription(subscription)
         self._audit_subscription(subscription, None, status, event.provider, "Provider created subscription")
-        if status in {SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING}:
+        if status in {SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING} and order.status in {
+            OrderStatus.PAID, OrderStatus.FULFILLMENT_PENDING, OrderStatus.ACTIVE,
+        }:
             self._grant_entitlements(order, self.repository.get_product_version(item.product_version_id), subscription.subscription_id)
         self._emit_from_billing("subscription.activated", event, {"subscription_id": subscription.subscription_id, "status": status.value})
 
@@ -424,7 +631,10 @@ class CommercialService:
         changed = replace(subscription, billing_period=period)
         if event.subscription_status in {SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING}:
             changed = self._append_subscription(changed, event.subscription_status, RenewalState.WILL_RENEW, event.reason or "Subscription active", grace_period=None, actor_id=event.provider)
-            self._transition_managed_entitlements(changed, EntitlementStatus.ACTIVE, "Payment current", effective_until=None)
+            order = self.repository.get_order(event.tenant_id, event.company_id, changed.order_id)
+            if order.status in {OrderStatus.PAID, OrderStatus.FULFILLMENT_PENDING, OrderStatus.ACTIVE}:
+                self._grant_entitlements(order, self.repository.get_product_version(changed.plan.product_version_id), changed.subscription_id)
+                self._transition_managed_entitlements(changed, EntitlementStatus.ACTIVE, "Payment current", effective_until=None)
         elif event.subscription_status is SubscriptionStatus.CANCEL_AT_PERIOD_END:
             changed = self._append_subscription(changed, event.subscription_status, RenewalState.WILL_CANCEL, event.reason or "Cancellation scheduled", grace_period=None, actor_id=event.provider)
             self._transition_managed_entitlements(changed, EntitlementStatus.EXPIRING, "Cancellation scheduled", effective_until=period.ends_at)
@@ -472,10 +682,31 @@ class CommercialService:
         target = OrderStatus.REFUNDED if kind is RefundKind.FULL else OrderStatus.PARTIALLY_REFUNDED
         if order.status is not target:
             self._transition_order(order, target, event.provider, refund.reason)
+        if kind is RefundKind.FULL:
+            for grant in self.repository.get_current_entitlement_grants(order.tenant_id, order.company_id):
+                if grant.source_order_id != order.order_id or grant.entitlement_class is not EntitlementClass.STROMATION_MANAGED:
+                    continue
+                if grant.status in {EntitlementStatus.ACTIVE, EntitlementStatus.EXPIRING}:
+                    changed = replace(
+                        grant, status=EntitlementStatus.SUSPENDED,
+                        status_reason="Initial charge fully refunded; supervised fulfillment review required",
+                        updated_at=self.clock(), version=grant.version + 1,
+                    )
+                    self.repository.append_entitlement_grant(changed)
+                    self._audit_order(order, "commercial_service", "entitlement.suspended_after_refund",
+                                      "Full refund paused managed fulfillment", target_type="entitlement_grant",
+                                      target_id=grant.grant_id)
         self._emit_from_billing("order.refund_recorded", event, {"order_id": order.order_id, "refund_id": refund.refund_id, "kind": kind.value})
 
     def _grant_entitlements(self, order: Order, version, source_subscription_id: str | None) -> None:
         for definition in version.entitlements:
+            if any(
+                grant.source_order_id == order.order_id
+                and grant.source_subscription_id == source_subscription_id
+                and grant.entitlement_code == definition.entitlement_code
+                for grant in self.repository.get_current_entitlement_grants(order.tenant_id, order.company_id)
+            ):
+                continue
             grant = EntitlementGrant(
                 self.id_factory("entitlement_grant"), order.tenant_id, order.user_id, order.company_id,
                 definition.entitlement_code, definition.entitlement_class, EntitlementStatus.ACTIVE,

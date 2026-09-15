@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from businessbuilder.customer_api.bootstrap import create_postgres_customer_api
+from businessbuilder.commercial.stripe_test import StripeTestPaymentProvider
 from businessbuilder.identity import cognito_authentication_from_environment
 from businessbuilder.postgres.cloud_proof import get_cloud_proof, run_cloud_proof
 from businessbuilder.postgres.connection import connect_postgres
@@ -322,15 +323,18 @@ class StagingHandler(SimpleHTTPRequestHandler):
                     return
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw) if raw else {}
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._json(
-                        HTTPStatus.BAD_REQUEST,
-                        {"status": "error", "error": "invalid_json"},
-                        headers=response_headers,
-                    )
-                    return
+                if urlsplit(self.path).path == "/api/v1/payment-webhooks/stripe":
+                    body = raw  # Signature validation requires the unmodified bytes.
+                else:
+                    try:
+                        body = json.loads(raw) if raw else {}
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        self._json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid_json"},
+                            headers=response_headers,
+                        )
+                        return
             parsed = urlsplit(self.path)
             response = application.handle(
                 method=method,
@@ -417,9 +421,18 @@ if __name__ == "__main__":
         raise RuntimeError("CUSTOMER_API_PRINCIPAL_KEY must contain at least 32 bytes")
     port = int(os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), StagingHandler)
+    stripe_key = os.environ.get("STRIPE_TEST_SECRET_KEY", "")
+    stripe_webhook = os.environ.get("STRIPE_TEST_WEBHOOK_SECRET", "")
+    payment_provider = (
+        StripeTestPaymentProvider(api_key=stripe_key, webhook_secret=stripe_webhook)
+        if stripe_key and stripe_webhook else None
+    )
     server.customer_api = create_postgres_customer_api(
         signing_key=signing_key,
         founder_authentication_provider=cognito_authentication_from_environment(),
+        payment_provider=payment_provider,
+        checkout_success_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_SUCCESS_URL"),
+        checkout_cancel_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_CANCEL_URL"),
     )
     print(f"Business Builder staging listening on :{port}", flush=True)
     server.serve_forever()

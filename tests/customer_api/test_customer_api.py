@@ -21,6 +21,9 @@ from businessbuilder.commercial import (
     RecordingCommercialEventSink,
     seed_default_catalog,
 )
+from businessbuilder.commercial.pricing import OfferCode
+from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
+from tests.commercial.test_supervised_checkout import provider
 from businessbuilder.access_broker import InMemorySecretStore
 from businessbuilder.provider_connection import ProviderConnectionService, SandboxEmailProvider
 from businessbuilder.identity import AuthorizationPolicy
@@ -337,6 +340,37 @@ class CustomerApiTests(unittest.TestCase):
             403,
             self.request("GET", "/api/v1/orders", token=member_token, query={"company_id": [self.company_id]}).status,
         )
+
+    def test_supervised_pricing_and_payment_routes_do_not_accept_browser_authority(self) -> None:
+        pricing = self.request("GET", "/api/v1/pricing")
+        self.assertEqual(200, pricing.status)
+        existing = next(item for item in pricing.body["offers"] if item["offer_code"] == "existing_business_run_v1")
+        self.assertEqual("quote_required", existing["price_kind"])
+        self.assertIsNone(existing["upfront_minor"])
+        order = self.commercial.create_order(
+            self.owner_context, "product_version_build_business_v1", offer_code=OfferCode.BUSINESS,
+        )
+        stripe, _ = provider()
+        self.api.payment_provider = stripe
+        self.api.payment_webhooks = StripeWebhookIngress(self.commercial_repository, self.commercial, stripe)
+        self.api.checkout_success_url = "https://pilot.example.test/success"
+        self.api.checkout_cancel_url = "https://pilot.example.test/cancel"
+        path = f"/api/v1/orders/{order.order_id}/checkout"
+        selector = {"company_id": [self.company_id]}
+        delayed = self.request("POST", path, token=self.owner_token, query=selector,
+                               body={"idempotency_key": "founder-checkout-retry-0001"})
+        self.assertEqual(409, delayed.status)
+        self.assertFalse(self.commercial_repository.get_current_entitlement_grants(self.tenant.tenant_id, self.company_id))
+        forged = self.request("POST", path, token=self.owner_token, query=selector,
+                              headers={"X-Tenant-ID": "tenant_other"},
+                              body={"idempotency_key": "founder-checkout-retry-0001"})
+        self.assertEqual(403, forged.status)
+        invalid_webhook = self.request(
+            "POST", "/api/v1/payment-webhooks/stripe", body=b"{}",
+            headers={"Stripe-Signature": "t=0,v1=forged"},
+        )
+        self.assertEqual(400, invalid_webhook.status)
+        self.assertFalse(self.commercial_repository.get_current_entitlement_grants(self.tenant.tenant_id, self.company_id))
 
     def test_complete_customer_route_inventory_uses_safe_projections(self) -> None:
         for path, key in (

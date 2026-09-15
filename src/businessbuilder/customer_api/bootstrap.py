@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from businessbuilder.commercial import CommercialService, seed_default_catalog
+from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
 from businessbuilder.company_brain import CompanyBrainService
 from businessbuilder.integration import (
     CompanyBrainRuntimeAdapter,
@@ -58,6 +59,9 @@ def create_postgres_customer_api(
     residential_cleaning_evidence_store=None,
     residential_cleaning_malware_scanner=None,
     founder_authentication_provider=None,
+    payment_provider=None,
+    checkout_success_url: str | None = None,
+    checkout_cancel_url: str | None = None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -140,4 +144,9 @@ def create_postgres_customer_api(
         live_canary_readiness=live_canary_readiness,
         residential_cleaning=residential_cleaning,
         founder_authentication=founder_authentication,
+        payment_provider=payment_provider,
+        payment_webhooks=(StripeWebhookIngress(commercial_repository, commercial, payment_provider)
+                          if payment_provider is not None else None),
+        checkout_success_url=checkout_success_url,
+        checkout_cancel_url=checkout_cancel_url,
     )

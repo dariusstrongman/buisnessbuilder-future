@@ -15,6 +15,7 @@ from businessbuilder._serialization import decode_record, encode_record
 from .models import (
     CancellationRecord,
     CheckoutIntent,
+    CommercialQuote,
     CommercialEvent,
     EntitlementGrant,
     Order,
@@ -88,6 +89,12 @@ class CommercialRepository(ABC):
     def append_order(self, order: Order) -> None: ...
 
     @abstractmethod
+    def append_quote(self, quote: CommercialQuote) -> None: ...
+
+    @abstractmethod
+    def get_quote(self, tenant_id: str, company_id: str, quote_id: str) -> CommercialQuote: ...
+
+    @abstractmethod
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order: ...
 
     @abstractmethod
@@ -104,6 +111,9 @@ class CommercialRepository(ABC):
 
     @abstractmethod
     def get_checkout_by_idempotency(self, tenant_id: str, company_id: str, key: str) -> CheckoutIntent | None: ...
+
+    @abstractmethod
+    def get_checkout_by_provider_ref(self, provider_ref: str) -> CheckoutIntent: ...
 
     @abstractmethod
     def save_payment(self, payment: PaymentIntentRef) -> None: ...
@@ -128,6 +138,9 @@ class CommercialRepository(ABC):
 
     @abstractmethod
     def get_subscription_by_provider_ref(self, tenant_id: str, company_id: str, provider_ref: str) -> Subscription | None: ...
+
+    @abstractmethod
+    def get_subscription_by_provider_ref_any(self, provider_ref: str) -> Subscription: ...
 
     @abstractmethod
     def subscription_history(self, tenant_id: str, company_id: str, subscription_id: str) -> tuple[Subscription, ...]: ...
@@ -169,6 +182,7 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.products: dict[str, Product] = {}
         self.product_versions: dict[str, ProductVersion] = {}
         self.orders: dict[tuple[str, str, str], list[Order]] = {}
+        self.quotes: dict[tuple[str, str, str], list[CommercialQuote]] = {}
         self.checkouts: dict[tuple[str, str, str], CheckoutIntent] = {}
         self.payments: dict[tuple[str, str, str], PaymentIntentRef] = {}
         self.refunds: list[RefundRecord] = []
@@ -184,6 +198,7 @@ class InMemoryCommercialRepository(CommercialRepository):
         "products",
         "product_versions",
         "orders",
+        "quotes",
         "checkouts",
         "payments",
         "refunds",
@@ -384,6 +399,19 @@ class InMemoryCommercialRepository(CommercialRepository):
                 raise CommercialConflict("new order must start at version 1")
             history.append(order)
 
+    def append_quote(self, quote: CommercialQuote) -> None:
+        with self.lock:
+            history = self.quotes.setdefault((quote.tenant_id, quote.company_id, quote.quote_id), [])
+            if quote.version != (history[-1].version + 1 if history else 1):
+                raise CommercialConflict("quote versions must be contiguous")
+            history.append(quote)
+
+    def get_quote(self, tenant_id: str, company_id: str, quote_id: str) -> CommercialQuote:
+        history = self.quotes.get((tenant_id, company_id, quote_id))
+        if not history:
+            raise CommercialNotFound("quote not found in scope")
+        return history[-1]
+
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order:
         history = self.orders.get((tenant_id, company_id, order_id))
         if not history:
@@ -406,6 +434,15 @@ class InMemoryCommercialRepository(CommercialRepository):
             existing = self.get_checkout_by_idempotency(checkout.tenant_id, checkout.company_id, checkout.idempotency_key)
             if existing and existing.checkout_intent_id != checkout.checkout_intent_id:
                 raise CommercialConflict("checkout idempotency key already used")
+            if existing and existing.provider_ref and checkout.provider_ref != existing.provider_ref:
+                raise CommercialConflict("provider checkout reference is immutable")
+            if existing and existing.redirect_url and checkout.redirect_url != existing.redirect_url:
+                raise CommercialConflict("checkout redirect URL is immutable")
+            if checkout.provider_ref and any(
+                item.provider_ref == checkout.provider_ref and item.checkout_intent_id != checkout.checkout_intent_id
+                for item in self.checkouts.values()
+            ):
+                raise CommercialConflict("provider checkout reference already belongs to another order")
             self.checkouts[(checkout.tenant_id, checkout.company_id, checkout.checkout_intent_id)] = checkout
 
     def get_checkout(self, tenant_id: str, company_id: str, checkout_id: str) -> CheckoutIntent:
@@ -417,6 +454,12 @@ class InMemoryCommercialRepository(CommercialRepository):
     def get_checkout_by_idempotency(self, tenant_id: str, company_id: str, key: str) -> CheckoutIntent | None:
         return next((item for scope, item in self.checkouts.items() if scope[:2] == (tenant_id, company_id) and item.idempotency_key == key), None)
 
+    def get_checkout_by_provider_ref(self, provider_ref: str) -> CheckoutIntent:
+        matches = [item for item in self.checkouts.values() if item.provider_ref == provider_ref]
+        if len(matches) != 1:
+            raise CommercialNotFound("provider checkout is not uniquely mapped")
+        return matches[0]
+
     def save_payment(self, payment: PaymentIntentRef) -> None:
         with self.lock:
             key = (payment.tenant_id, payment.company_id, payment.payment_ref_id)
@@ -427,6 +470,12 @@ class InMemoryCommercialRepository(CommercialRepository):
 
     def get_payment_for_order(self, tenant_id: str, company_id: str, order_id: str) -> PaymentIntentRef | None:
         return next((item for (t, c, _), item in self.payments.items() if (t, c, item.order_id) == (tenant_id, company_id, order_id)), None)
+
+    def get_payment_by_provider_ref(self, provider_ref: str) -> PaymentIntentRef:
+        matches = [item for item in self.payments.values() if item.provider_ref == provider_ref]
+        if len(matches) != 1:
+            raise CommercialNotFound("provider payment is not uniquely mapped")
+        return matches[0]
 
     def append_refund(self, refund: RefundRecord) -> None:
         with self.lock:
@@ -461,6 +510,12 @@ class InMemoryCommercialRepository(CommercialRepository):
 
     def get_subscription_by_provider_ref(self, tenant_id: str, company_id: str, provider_ref: str) -> Subscription | None:
         return next((history[-1] for (t, c, _), history in self.subscriptions.items() if (t, c) == (tenant_id, company_id) and history[-1].provider_ref == provider_ref), None)
+
+    def get_subscription_by_provider_ref_any(self, provider_ref: str) -> Subscription:
+        matches = [history[-1] for history in self.subscriptions.values() if history[-1].provider_ref == provider_ref]
+        if len(matches) != 1:
+            raise CommercialNotFound("provider subscription is not uniquely mapped")
+        return matches[0]
 
     def subscription_history(self, tenant_id: str, company_id: str, subscription_id: str) -> tuple[Subscription, ...]:
         return tuple(self.subscriptions.get((tenant_id, company_id, subscription_id), ()))
@@ -507,20 +562,21 @@ from .models import (
     Amount, BillingMode, BillingPeriod, CancellationPolicy, CancellationTiming,
     CheckoutStatus, Entitlement, EntitlementClass, EntitlementStatus, Feature,
     GracePeriod, OrderItem, OrderStatus, Package, ProductCode, RefundKind,
+    PaymentEligibility, TaxDisposition, QuoteStatus,
     RenewalState, SubscriptionPlanRef, SubscriptionStatus,
 )
 
 _COMMERCIAL_TYPES = {
     item.__name__: item
     for item in (
-        Product, ProductVersion, Feature, Entitlement, Package, Order, OrderItem,
+        Product, ProductVersion, Feature, Entitlement, Package, Order, OrderItem, CommercialQuote,
         CheckoutIntent, PaymentIntentRef, RefundRecord, CancellationRecord,
         Subscription, SubscriptionPlanRef, EntitlementGrant, OrderAuditEvent,
         SubscriptionAuditEvent, Amount, BillingPeriod, GracePeriod,
         CancellationPolicy, ProductCode, BillingMode, EntitlementClass,
         EntitlementStatus, OrderStatus, CheckoutStatus, SubscriptionStatus,
         RenewalState, RefundKind, CancellationTiming, CommercialEvent,
-        OutboxMessage, OutboxStatus,
+        OutboxMessage, OutboxStatus, PaymentEligibility, TaxDisposition, QuoteStatus,
     )
 }
 
@@ -613,6 +669,7 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
             if kind == "product": self.products[key] = value
             elif kind == "product_version": self.product_versions[key] = value
             elif kind == "order": self.orders.setdefault((value.tenant_id, value.company_id, value.order_id), []).append(value)
+            elif kind == "quote": self.quotes.setdefault((value.tenant_id, value.company_id, value.quote_id), []).append(value)
             elif kind == "checkout": self.checkouts[(value.tenant_id, value.company_id, value.checkout_intent_id)] = value
             elif kind == "payment": self.payments[(value.tenant_id, value.company_id, value.payment_ref_id)] = value
             elif kind == "refund": self.refunds.append(value)
@@ -704,6 +761,10 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
     def append_order(self, order: Order) -> None:
         super().append_order(order)
         self._insert("order", self._scope(order.tenant_id, order.company_id, order.order_id), order.version, order, order.tenant_id, order.company_id)
+
+    def append_quote(self, quote: CommercialQuote) -> None:
+        super().append_quote(quote)
+        self._insert("quote", self._scope(quote.tenant_id, quote.company_id, quote.quote_id), quote.version, quote, quote.tenant_id, quote.company_id)
 
     def save_checkout(self, checkout: CheckoutIntent) -> None:
         super().save_checkout(checkout)

@@ -14,6 +14,8 @@ from businessbuilder.commercial import (
     ProductCode,
 )
 from businessbuilder.commercial.repository import CommercialNotFound, CommercialRepository
+from businessbuilder.commercial.pricing import OfferCode
+from businessbuilder.commercial.models import PaymentEligibility, TaxDisposition
 from businessbuilder.company_brain import (
     Company,
     CompanyBrainService,
@@ -647,6 +649,27 @@ class ResidentialCleaningJourneyService:
 
         self._mark_scope_approval_complete(scope, verified.user_id, approval_id)
 
+        intake = self._record(scope, "intake_residential_cleaning_v1")
+        if intake.data.get("starting_point") == "running":
+            # The Existing Business + Run offer is a starting price, not a fixed
+            # new-business charge. Do not create an order before an audit/quote.
+            updated_workflow = {
+                **dict(workflow.data),
+                "state": "existing_business_audit_required",
+                "order_id": None,
+                "order_status": None,
+                "entitlement_ids": [],
+                "commercial_mode": "audit_quote_founder_approval_required",
+            }
+            if dict(workflow.data) != updated_workflow:
+                self.company_brain.update_approved_state(
+                    scope, record_id=workflow.record_id, kind=workflow.kind,
+                    data=updated_workflow, knowledge_class=workflow.knowledge_class,
+                    provenance=workflow.provenance, confidence=workflow.confidence,
+                    owner_ref=workflow.owner_ref, expected_version=workflow.version,
+                )
+            return self.project(verified)
+
         suffix = verified.company_id.removeprefix("company_cleaning_")
         order_id = f"order_cleaning_build_{suffix}"
         context = AuthorizationContext(
@@ -661,8 +684,20 @@ class ResidentialCleaningJourneyService:
                 context,
                 f"product_version_{ProductCode.BUILD_BUSINESS.value.lower()}_v1",
                 order_id=order_id,
+                offer_code=OfferCode.BUSINESS,
             )
+        if order.offer_code is None and order.status is OrderStatus.DRAFT:
+            order = self.commercial.select_fixed_offer(context, order.order_id, OfferCode.BUSINESS)
         if self.enable_test_checkout:
+            if order.eligibility is PaymentEligibility.PAYMENT_DELAY_REQUIRED:
+                order = self.commercial.record_payment_readiness(
+                    tenant_id=order.tenant_id, company_id=order.company_id,
+                    order_id=order.order_id,
+                    eligibility=PaymentEligibility.PAY_NOW_ELIGIBLE,
+                    eligible_at=None,
+                    tax_disposition=TaxDisposition.NON_TAXABLE,
+                    review_ref="deterministic_test_only_tax_and_eligibility",
+                )
             order = self._activate_test_order(context, order)
 
         grants = tuple(
@@ -697,6 +732,62 @@ class ResidentialCleaningJourneyService:
                 expected_version=workflow.version,
             )
         return self.project(verified)
+
+    def capture_existing_business_audit(
+        self, principal: AuthenticatedPrincipal, *, systems: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Record founder-supplied cleaning-system facts, not an operator-approved quote."""
+        verified = self.principal_authority.verify(
+            principal, tenant_id=principal.tenant_id, company_id=principal.company_id or ""
+        )
+        if verified.role is not Role.OWNER or verified.company_id is None:
+            raise PermissionError("only the scoped founder may submit this audit inventory")
+        scope = Scope(verified.tenant_id, verified.company_id)
+        intake = self._record(scope, "intake_residential_cleaning_v1")
+        if intake.data.get("starting_point") != "running":
+            raise PilotConflict("existing-business audit belongs only to the running-business path")
+        if not isinstance(systems, list) or not 1 <= len(systems) <= 12:
+            raise ValueError("one through twelve existing systems are required")
+        allowed_systems = {
+            "website", "lead_capture", "crm", "inbox", "scheduling", "payments",
+            "bookkeeping", "local_presence", "business_phone", "analytics",
+        }
+        inventory = []
+        seen = set()
+        for raw in systems:
+            if not isinstance(raw, dict) or set(raw) - {"system", "assessment", "issue", "provider_reference"}:
+                raise ValueError("existing system record is invalid")
+            system, assessment, issue = raw.get("system"), raw.get("assessment"), raw.get("issue")
+            provider_reference = raw.get("provider_reference")
+            if system not in allowed_systems or system in seen or assessment not in {"keep", "improve", "replace", "missing"}:
+                raise ValueError("existing system classification is invalid")
+            if not isinstance(issue, str) or not 3 <= len(issue.strip()) <= 500:
+                raise ValueError("existing system issue is invalid")
+            if provider_reference is not None and (
+                not isinstance(provider_reference, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{3,160}", provider_reference)
+            ):
+                raise ValueError("provider reference must be opaque")
+            seen.add(system)
+            inventory.append({"system": system, "assessment": assessment,
+                              "issue": issue.strip(), "provider_reference": provider_reference})
+        packet = {
+            "vertical": "residential_cleaning",
+            "state": "founder_inventory_pending_operator_scope",
+            "systems": inventory,
+            "responsibility": "FOUNDER_ACTION",
+            "source_class": "founder_assertion_not_verified",
+            "content_digest": canonical_digest(inventory),
+        }
+        owner = EntityRef("user", verified.user_id)
+        provenance = (Provenance(
+            "authenticated_founder_existing_systems", self._iso(self.clock()), owner,
+            source_ref=f"customer-api://residential-cleaning/{verified.company_id}/existing-audit",
+        ),)
+        record = self._ensure_record(
+            scope, "existing_business_audit_residential_cleaning_v1",
+            RecordKind.WORKFLOW, packet, KnowledgeClass.FACT, provenance, owner,
+        )
+        return self._public_record(record)
 
     def transition_founder_action(
         self,
@@ -849,6 +940,12 @@ class ResidentialCleaningJourneyService:
         research = self._record(scope, "research_residential_cleaning_denton_v1")
         proposed = self._record(scope, "recommendation_residential_cleaning_v1")
         workflow = self._record(scope, "pilot_residential_cleaning_v1")
+        try:
+            existing_audit = self.company_brain.repository.get_record(
+                scope, "existing_business_audit_residential_cleaning_v1"
+            )
+        except NotFoundError:
+            existing_audit = None
         approval = self.runtime_repository.get_approval(
             scope.tenant_id, scope.company_id, workflow.data["approval_id"]
         )
@@ -908,6 +1005,7 @@ class ResidentialCleaningJourneyService:
             "intake": self._public_record(intake),
             "research": self._public_record(research),
             "recommendation": self._public_record(proposed),
+            "existing_business_audit": self._public_record(existing_audit) if existing_audit else None,
             "scope_commit": {
                 "state": workflow.data["state"],
                 "job_id": workflow.data["job_id"],

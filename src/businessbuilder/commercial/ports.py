@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .models import Amount, CommercialEvent
+from .models import Amount, CommercialEvent, Order
+
+
+class SupervisedPaymentProvider(Protocol):
+    """Only the provider can mint a checkout URL or authenticate a billing event."""
+
+    def open_checkout(self, *, order: Order, idempotency_key: str,
+                      success_url: str, cancel_url: str) -> tuple[str, str | None]: ...
+
+    def verify_webhook(self, signature: str, raw_body: bytes) -> dict: ...
+
+    def subscription_period(self, provider_subscription_ref: str) -> tuple[int, int]: ...
 
 
 class BillingProvider(Protocol):
