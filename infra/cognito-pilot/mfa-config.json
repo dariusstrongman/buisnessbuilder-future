@@ -1,0 +1,5 @@
+{
+  "UserPoolId": "us-east-1_Fp59rCMh2",
+  "MfaConfiguration": "OPTIONAL",
+  "SoftwareTokenMfaConfiguration": {"Enabled": true}
+}

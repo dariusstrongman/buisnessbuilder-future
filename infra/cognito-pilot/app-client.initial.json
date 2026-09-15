@@ -1,0 +1,30 @@
+{
+  "UserPoolId": "us-east-1_Fp59rCMh2",
+  "ClientId": "5t30mb06io1c0erboms6s29s5i",
+  "ClientName": "businessbuilder-pilot-web-v1",
+  "RefreshTokenValidity": 1,
+  "AccessTokenValidity": 15,
+  "IdTokenValidity": 15,
+  "AuthSessionValidity": 3,
+  "TokenValidityUnits": {
+    "AccessToken": "minutes",
+    "IdToken": "minutes",
+    "RefreshToken": "days"
+  },
+  "ReadAttributes": ["email", "email_verified", "name"],
+  "WriteAttributes": ["email", "name"],
+  "ExplicitAuthFlows": ["ALLOW_USER_AUTH", "ALLOW_USER_SRP_AUTH"],
+  "SupportedIdentityProviders": ["COGNITO"],
+  "CallbackURLs": ["https://d3qncwxo58gn5b.cloudfront.net/api/auth/callback"],
+  "LogoutURLs": ["https://d3qncwxo58gn5b.cloudfront.net/login?logged_out=1"],
+  "AllowedOAuthFlows": ["code"],
+  "AllowedOAuthScopes": ["openid", "email", "profile", "aws.cognito.signin.user.admin"],
+  "AllowedOAuthFlowsUserPoolClient": true,
+  "PreventUserExistenceErrors": "ENABLED",
+  "EnableTokenRevocation": true,
+  "EnablePropagateAdditionalUserContextData": false,
+  "RefreshTokenRotation": {
+    "Feature": "ENABLED",
+    "RetryGracePeriodSeconds": 5
+  }
+}

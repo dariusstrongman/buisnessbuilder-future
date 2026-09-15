@@ -1,0 +1,103 @@
+{
+  "family": "businessbuilder-pilot-auth-v1",
+  "taskRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-task-role",
+  "executionRoleArn": "arn:aws:iam::199949321335:role/businessbuilder-staging-ecs-execution-role",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:0a680aff94e3109465836e707988b3ac3aeaa1b7f2ef2725e35a3dbbf5fe521a",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {"initProcessEnabled": true},
+      "environment": [
+        {"name": "APP_VERSION", "value": "cognito-pilot-acceptance-v1"},
+        {"name": "ENVIRONMENT", "value": "pilot"},
+        {"name": "AWS_REGION", "value": "us-east-1"},
+        {"name": "DB_HOST", "value": "businessbuilder-staging-postgres.c6dky0uekbz0.us-east-1.rds.amazonaws.com"},
+        {"name": "DB_PORT", "value": "5432"},
+        {"name": "DB_NAME", "value": "businessbuilder"},
+        {"name": "DB_SCHEMA", "value": "bb_cognito_pilot_v1"},
+        {"name": "DB_SSLMODE", "value": "require"},
+        {"name": "BUSINESS_BUILDER_AUTH_PROVIDER", "value": "cognito"},
+        {"name": "COGNITO_USER_POOL_ID", "value": "us-east-1_Fp59rCMh2"},
+        {"name": "COGNITO_APP_CLIENT_ID", "value": "5t30mb06io1c0erboms6s29s5i"}
+      ],
+      "secrets": [
+        {"name": "DB_USER", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:username::"},
+        {"name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:rds!db-9f2897e1-1327-4129-bc98-0c2dc9cbee87-fKvB2A:password::"},
+        {"name": "CUSTOMER_API_PRINCIPAL_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-pilot-auth-runtime-v1-eVassI:customer_api_principal_key::"}
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)\" || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/businessbuilder-staging",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "pilot-auth-backend"
+        }
+      }
+    },
+    {
+      "name": "site",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:ca745555c4394dd005ab0829598895e27eb048ae740789e26aca98bc6dd0f3e4",
+      "essential": true,
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {"initProcessEnabled": true},
+      "dependsOn": [{"containerName": "backend", "condition": "HEALTHY"}],
+      "portMappings": [
+        {"name": "site-http", "containerPort": 3000, "hostPort": 3000, "protocol": "tcp", "appProtocol": "http"}
+      ],
+      "environment": [
+        {"name": "NODE_ENV", "value": "production"},
+        {"name": "NEXT_TELEMETRY_DISABLED", "value": "1"},
+        {"name": "PORT", "value": "3000"},
+        {"name": "HOSTNAME", "value": "0.0.0.0"},
+        {"name": "BUSINESS_BUILDER_API_URL", "value": "http://127.0.0.1:8080"},
+        {"name": "BUSINESS_BUILDER_AUTH_PROVIDER", "value": "cognito"},
+        {"name": "COGNITO_DOMAIN", "value": "https://businessbuilder-pilot-199949321335.auth.us-east-1.amazoncognito.com"},
+        {"name": "COGNITO_APP_CLIENT_ID", "value": "5t30mb06io1c0erboms6s29s5i"},
+        {"name": "COGNITO_REDIRECT_URI", "value": "https://d3qncwxo58gn5b.cloudfront.net/api/auth/callback"},
+        {"name": "COGNITO_LOGOUT_URI", "value": "https://d3qncwxo58gn5b.cloudfront.net/login?logged_out=1"},
+        {"name": "NEXT_PUBLIC_SITE_URL", "value": "https://d3qncwxo58gn5b.cloudfront.net"}
+      ],
+      "secrets": [
+        {"name": "BUSINESS_BUILDER_AUTH_COOKIE_SIGNING_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-pilot-auth-runtime-v1-eVassI:bff_cookie_signing_key::"}
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/login || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/businessbuilder-staging",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "pilot-auth-site"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {"key": "Application", "value": "businessbuilder"},
+    {"key": "Environment", "value": "pilot"},
+    {"key": "ManagedBy", "value": "Codex"},
+    {"key": "Purpose", "value": "founder-auth-acceptance-v1"}
+  ]
+}

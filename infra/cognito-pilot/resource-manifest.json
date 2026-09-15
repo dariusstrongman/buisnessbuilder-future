@@ -1,0 +1,38 @@
+{
+  "region": "us-east-1",
+  "environment": "pilot",
+  "cognito": {
+    "user_pool_name": "businessbuilder-pilot-auth-v1",
+    "user_pool_id": "us-east-1_Fp59rCMh2",
+    "app_client_name": "businessbuilder-pilot-web-v1",
+    "app_client_id": "5t30mb06io1c0erboms6s29s5i",
+    "app_client_type": "public",
+    "domain_prefix": "businessbuilder-pilot-199949321335",
+    "managed_login_branding_id": "134442ce-91ab-4443-9db1-6ac002d300f6"
+  },
+  "edge": {
+    "cloudfront_distribution_id": "E1W26K53JZPMLJ",
+    "cloudfront_domain": "d3qncwxo58gn5b.cloudfront.net",
+    "load_balancer_arn": "arn:aws:elasticloadbalancing:us-east-1:199949321335:loadbalancer/app/bb-pilot-auth-v1/09de6798bc98820b",
+    "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:199949321335:targetgroup/bb-pilot-auth-web-v1/b6482953efb4f0b3"
+  },
+  "compute": {
+    "cluster": "businessbuilder-staging",
+    "service": "businessbuilder-pilot-auth",
+    "task_definition": "businessbuilder-pilot-auth-v1:5",
+    "cpu_units": 512,
+    "memory_mib": 1024,
+    "backend_image_digest": "sha256:0a680aff94e3109465836e707988b3ac3aeaa1b7f2ef2725e35a3dbbf5fe521a",
+    "site_image_digest": "sha256:ca745555c4394dd005ab0829598895e27eb048ae740789e26aca98bc6dd0f3e4"
+  },
+  "network": {
+    "load_balancer_security_group": "sg-032127bbe48017714",
+    "task_security_group": "sg-03510d3605c949e50",
+    "database": "existing-private-staging-rds",
+    "database_schema": "bb_cognito_pilot_v1"
+  },
+  "secret_references": {
+    "runtime": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-pilot-auth-runtime-v1-eVassI",
+    "synthetic_acceptance_identities": "arn:aws:secretsmanager:us-east-1:199949321335:secret:businessbuilder-pilot-auth-identities-v1-B4aUez"
+  }
+}

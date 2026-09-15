@@ -1,0 +1,52 @@
+{
+  "PoolName": "businessbuilder-pilot-auth-v1",
+  "Policies": {
+    "PasswordPolicy": {
+      "MinimumLength": 12,
+      "RequireUppercase": true,
+      "RequireLowercase": true,
+      "RequireNumbers": true,
+      "RequireSymbols": true,
+      "TemporaryPasswordValidityDays": 7
+    },
+    "SignInPolicy": {
+      "AllowedFirstAuthFactors": ["PASSWORD"]
+    }
+  },
+  "DeletionProtection": "ACTIVE",
+  "AutoVerifiedAttributes": ["email"],
+  "UsernameAttributes": ["email"],
+  "MfaConfiguration": "OFF",
+  "DeviceConfiguration": {
+    "ChallengeRequiredOnNewDevice": false,
+    "DeviceOnlyRememberedOnUserPrompt": true
+  },
+  "EmailVerificationSubject": "Verify your Business Builder pilot account",
+  "VerificationMessageTemplate": {
+    "DefaultEmailOption": "CONFIRM_WITH_CODE",
+    "EmailSubject": "Verify your Business Builder pilot account",
+    "EmailMessage": "Your Business Builder pilot verification code is {####}."
+  },
+  "AdminCreateUserConfig": {
+    "AllowAdminCreateUserOnly": false
+  },
+  "UserAttributeUpdateSettings": {
+    "AttributesRequireVerificationBeforeUpdate": ["email"]
+  },
+  "AccountRecoverySetting": {
+    "RecoveryMechanisms": [
+      {"Priority": 1, "Name": "verified_email"}
+    ]
+  },
+  "Schema": [
+    {"Name": "email", "Required": true, "Mutable": true},
+    {"Name": "name", "Required": false, "Mutable": true}
+  ],
+  "UserPoolTags": {
+    "Application": "businessbuilder",
+    "Environment": "pilot",
+    "ManagedBy": "Codex",
+    "Purpose": "founder-auth-acceptance-v1"
+  },
+  "UserPoolTier": "ESSENTIALS"
+}
