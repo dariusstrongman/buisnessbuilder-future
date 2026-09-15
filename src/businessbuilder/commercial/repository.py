@@ -109,6 +109,18 @@ class CommercialRepository(ABC):
     def get_admission(self, tenant_id: str, company_id: str, admission_id: str) -> CommercialAdmissionRecord: ...
 
     @abstractmethod
+    def gate_history(self, tenant_id: str, company_id: str, order_id: str, kind) -> tuple[object, ...]: ...
+
+    @abstractmethod
+    def append_release_gate(self, record) -> None: ...
+
+    @abstractmethod
+    def get_release_packet(self, tenant_id: str, company_id: str, order_id: str): ...
+
+    @abstractmethod
+    def append_release_packet(self, packet) -> None: ...
+
+    @abstractmethod
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order: ...
 
     @abstractmethod
@@ -205,6 +217,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.cancellations: list[CancellationRecord] = []
         self.subscriptions: dict[tuple[str, str, str], list[Subscription]] = {}
         self.entitlement_grants: dict[tuple[str, str, str], list[EntitlementGrant]] = {}
+        self.release_gates: dict[tuple[str, str, str, str], list[object]] = {}
+        self.release_packets: dict[tuple[str, str, str], object] = {}
         self.audit: list[object] = []
         self.processed_events: set[tuple[str, str]] = set()
         self.outbox: dict[str, OutboxMessage] = {}
@@ -223,6 +237,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         "cancellations",
         "subscriptions",
         "entitlement_grants",
+        "release_gates",
+        "release_packets",
         "audit",
         "processed_events",
         "outbox",
@@ -594,6 +610,27 @@ class InMemoryCommercialRepository(CommercialRepository):
     def list_audit(self, tenant_id: str, company_id: str) -> tuple[object, ...]:
         return tuple(item for item in self.audit if getattr(item, "tenant_id", None) == tenant_id and getattr(item, "company_id", None) == company_id)
 
+    def gate_history(self, tenant_id: str, company_id: str, order_id: str, kind) -> tuple[object, ...]:
+        return tuple(self.release_gates.get((tenant_id, company_id, order_id, kind.value), ()))
+
+    def append_release_gate(self, record) -> None:
+        with self.lock:
+            key = (record.tenant_id, record.company_id, record.order_id, record.kind.value)
+            history = self.release_gates.setdefault(key, [])
+            if record.version != len(history) + 1:
+                raise CommercialConflict("release gate version conflict")
+            history.append(record)
+
+    def get_release_packet(self, tenant_id: str, company_id: str, order_id: str):
+        return self.release_packets.get((tenant_id, company_id, order_id))
+
+    def append_release_packet(self, packet) -> None:
+        with self.lock:
+            key = (packet.tenant_id, packet.company_id, packet.order_id)
+            if key in self.release_packets:
+                raise CommercialConflict("release packet cannot be silently renewed")
+            self.release_packets[key] = packet
+
     def billing_event_processed(self, provider: str, provider_event_ref: str) -> bool:
         return (provider, provider_event_ref) in self.processed_events
 
@@ -609,6 +646,7 @@ from .models import (
     PaymentEligibility, TaxDisposition, TaxReviewState, QuoteStatus,
     RenewalState, SubscriptionPlanRef, SubscriptionStatus,
 )
+from .paid_pilot_release import GateKind, GateStatus, ReleaseStatus, GateRecord, FirstCustomerPacket
 
 _COMMERCIAL_TYPES = {
     item.__name__: item
@@ -622,6 +660,7 @@ _COMMERCIAL_TYPES = {
         EntitlementStatus, OrderStatus, CheckoutStatus, SubscriptionStatus,
         RenewalState, RefundKind, CancellationTiming, CommercialEvent,
         OutboxMessage, OutboxStatus, PaymentEligibility, TaxDisposition, TaxReviewState, QuoteStatus,
+        GateKind, GateStatus, ReleaseStatus, GateRecord, FirstCustomerPacket,
     )
 }
 
@@ -723,6 +762,8 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
             elif kind == "cancellation": self.cancellations.append(value)
             elif kind == "subscription": self.subscriptions.setdefault((value.tenant_id, value.company_id, value.subscription_id), []).append(value)
             elif kind == "entitlement": self.entitlement_grants.setdefault((value.tenant_id, value.company_id, value.grant_id), []).append(value)
+            elif kind == "release_gate": self.release_gates.setdefault((value.tenant_id, value.company_id, value.order_id, value.kind.value), []).append(value)
+            elif kind == "release_packet": self.release_packets[(value.tenant_id, value.company_id, value.order_id)] = value
         for (body,) in self.connection.execute("SELECT body FROM commercial_audit_events ORDER BY rowid"):
             self.audit.append(decode_record(body, _COMMERCIAL_TYPES))
         self.processed_events.update(self.connection.execute("SELECT provider, provider_event_ref FROM processed_billing_events"))
@@ -731,6 +772,19 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
         ):
             self.outbox[outbox_id] = decode_record(body, _COMMERCIAL_TYPES)
             self.outbox_order.append(outbox_id)
+
+    def append_release_gate(self, record) -> None:
+        with self.transaction():
+            super().append_release_gate(record)
+            self._insert("release_gate", self._scope(record.tenant_id, record.company_id,
+                f"{record.order_id}\x1f{record.kind.value}"), record.version, record,
+                record.tenant_id, record.company_id)
+
+    def append_release_packet(self, packet) -> None:
+        with self.transaction():
+            super().append_release_packet(packet)
+            self._insert("release_packet", self._scope(packet.tenant_id, packet.company_id,
+                packet.order_id), packet.version, packet, packet.tenant_id, packet.company_id)
 
     def _save_outbox(self, message: OutboxMessage) -> None:
         statement = """

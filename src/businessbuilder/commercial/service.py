@@ -105,6 +105,7 @@ class CommercialService:
         operator_authority: CommercialOperatorAuthority | None = None,
         allow_test_admission: bool = False,
         tax_authority_verifier: Callable[[TaxReviewState, TaxDisposition, str | None], bool] | None = None,
+        paid_pilot_release_gate=None,
     ) -> None:
         self.repository = repository
         self.authorization = authorization
@@ -117,6 +118,7 @@ class CommercialService:
         self.operator_authority = operator_authority
         self.allow_test_admission = allow_test_admission
         self.tax_authority_verifier = tax_authority_verifier
+        self.paid_pilot_release_gate = paid_pilot_release_gate
         self.outbox = CommercialOutboxDispatcher(
             repository,
             events,
@@ -126,6 +128,12 @@ class CommercialService:
 
     def dispatch_pending_events(self, *, limit: int = 100) -> int:
         return self.outbox.dispatch_pending(limit=limit)
+
+    def require_live_checkout(self, order: Order):
+        if self.paid_pilot_release_gate is None:
+            raise CommercialConflict("live paid-pilot release gate not configured")
+        self._require_current_admission(order)
+        return self.paid_pilot_release_gate.require_live_charge(order)
 
     def _admission_digest(self, order: Order) -> str:
         quote = self.repository.get_quote(order.tenant_id, order.company_id, order.quote_id) if order.quote_id else None

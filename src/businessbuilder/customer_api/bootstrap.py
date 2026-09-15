@@ -6,6 +6,7 @@ from hashlib import sha256
 from businessbuilder.commercial import CommercialService, seed_default_catalog
 from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
 from businessbuilder.commercial.operator_authority import CommercialOperatorAuthority
+from businessbuilder.commercial.paid_pilot_release import PaidPilotReleaseGate
 from businessbuilder.company_brain import CompanyBrainService
 from businessbuilder.integration import (
     CompanyBrainRuntimeAdapter,
@@ -67,6 +68,8 @@ def create_postgres_customer_api(
     checkout_cancel_url: str | None = None,
     commercial_operator_provisioner_verifier=None,
     commercial_tax_authority_verifier=None,
+    paid_pilot_release_authority_verifier=None,
+    paid_pilot_packet_evidence_verifier=None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -111,6 +114,11 @@ def create_postgres_customer_api(
             privileged_provisioner_verifier=commercial_operator_provisioner_verifier,
         ),
         tax_authority_verifier=commercial_tax_authority_verifier,
+        paid_pilot_release_gate=PaidPilotReleaseGate(
+            commercial_repository, clock=clock,
+            authority_verifier=paid_pilot_release_authority_verifier,
+            packet_evidence_verifier=paid_pilot_packet_evidence_verifier,
+        ),
     )
     seed_default_catalog(commercial_repository, effective_at=clock())
     residential_cleaning = ResidentialCleaningJourneyService(

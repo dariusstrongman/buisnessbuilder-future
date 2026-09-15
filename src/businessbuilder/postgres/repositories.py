@@ -361,6 +361,12 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     self.entitlement_grants.setdefault(
                         (value.tenant_id, value.company_id, value.grant_id), []
                     ).append(value)
+                elif kind == "release_gate":
+                    self.release_gates.setdefault(
+                        (value.tenant_id, value.company_id, value.order_id, value.kind.value), []
+                    ).append(value)
+                elif kind == "release_packet":
+                    self.release_packets[(value.tenant_id, value.company_id, value.order_id)] = value
             cursor.execute(
                 "SELECT body FROM bb_commercial_audit_events ORDER BY sequence"
             )
@@ -411,6 +417,45 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     f"concurrent {kind} version conflict"
                 )
 
+    def gate_history(self, tenant_id: str, company_id: str, order_id: str, kind):
+        """Always re-read approvals; external holds and expiry must fail closed."""
+        key = self._scope(tenant_id, company_id, f"{order_id}\x1f{kind.value}")
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_commercial_records WHERE kind='release_gate' AND scope_key=%s ORDER BY version",
+                (key,),
+            )
+            history = [decode_record(row["body"], _COMMERCIAL_TYPES) for row in cursor]
+            self.release_gates[(tenant_id, company_id, order_id, kind.value)] = history
+            return tuple(history)
+
+    def append_release_gate(self, record) -> None:
+        with self.transaction():
+            self.gate_history(record.tenant_id, record.company_id, record.order_id, record.kind)
+            super().append_release_gate(record)
+            self._insert("release_gate", self._scope(record.tenant_id, record.company_id,
+                f"{record.order_id}\x1f{record.kind.value}"), record.version, record,
+                record.tenant_id, record.company_id)
+
+    def get_release_packet(self, tenant_id: str, company_id: str, order_id: str):
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute("SELECT body FROM bb_commercial_records WHERE kind='release_packet' AND scope_key=%s ORDER BY version DESC LIMIT 1",
+                           (self._scope(tenant_id, company_id, order_id),))
+            row = cursor.fetchone()
+            value = decode_record(row["body"], _COMMERCIAL_TYPES) if row else None
+            if value is None:
+                self.release_packets.pop((tenant_id, company_id, order_id), None)
+            else:
+                self.release_packets[(tenant_id, company_id, order_id)] = value
+            return value
+
+    def append_release_packet(self, packet) -> None:
+        with self.transaction():
+            self.get_release_packet(packet.tenant_id, packet.company_id, packet.order_id)
+            super().append_release_packet(packet)
+            self._insert("release_packet", self._scope(packet.tenant_id, packet.company_id,
+                packet.order_id), packet.version, packet, packet.tenant_id, packet.company_id)
+
     def save_product(self, product: Product, version: ProductVersion) -> None:
         super().save_product(product, version)
         self._insert("product", product.product_code.value, 1, product, replace_row=True)
@@ -433,6 +478,20 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
             order.company_id,
         )
 
+    def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order:
+        """Privileged Checkout/release paths must not trust a startup snapshot."""
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_commercial_records WHERE kind='order' AND scope_key=%s ORDER BY version",
+                (self._scope(tenant_id, company_id, order_id),),
+            )
+            history = [decode_record(row["body"], _COMMERCIAL_TYPES) for row in cursor]
+            if history:
+                self.orders[(tenant_id, company_id, order_id)] = history
+            else:
+                self.orders.pop((tenant_id, company_id, order_id), None)
+            return super().get_order(tenant_id, company_id, order_id)
+
     def append_quote(self, quote: CommercialQuote) -> None:
         super().append_quote(quote)
         self._insert(
@@ -443,6 +502,19 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
             quote.tenant_id,
             quote.company_id,
         )
+
+    def get_quote(self, tenant_id: str, company_id: str, quote_id: str) -> CommercialQuote:
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT body FROM bb_commercial_records WHERE kind='quote' AND scope_key=%s ORDER BY version",
+                (self._scope(tenant_id, company_id, quote_id),),
+            )
+            history = [decode_record(row["body"], _COMMERCIAL_TYPES) for row in cursor]
+            if history:
+                self.quotes[(tenant_id, company_id, quote_id)] = history
+            else:
+                self.quotes.pop((tenant_id, company_id, quote_id), None)
+            return super().get_quote(tenant_id, company_id, quote_id)
 
     def append_operator_grant(self, grant: CommercialOperatorGrant) -> None:
         super().append_operator_grant(grant)

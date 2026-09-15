@@ -17,6 +17,7 @@ from businessbuilder.commercial.pricing import OfferCode, public_pricing
 from businessbuilder.residential_cleaning.capability import canonical_digest
 from businessbuilder.commercial.repository import CommercialConflict
 from businessbuilder.commercial.repository import CommercialRepository
+from businessbuilder.commercial.stripe_test import StripeTestPaymentProvider
 from businessbuilder.company_brain import (
     Company,
     CompanyBrainService,
@@ -54,6 +55,7 @@ _APPROVAL_ROUTE = re.compile(
 )
 _ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
 _ORDER_CHECKOUT_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/checkout$")
+_PAID_PILOT_RELEASE_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/paid-pilot-release$")
 _ORDER_OFFER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/offer$")
 _OPERATOR_RELEASE_ROUTE = re.compile(
     r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/orders/([A-Za-z0-9_-]{1,128})/release$"
@@ -1396,6 +1398,22 @@ class CustomerApi:
             order = self.commercial.select_fixed_offer(self._context(principal), match.group(1), offer)
             return ApiResponse(HTTPStatus.OK, {"order": self._order(order)})
 
+        match = _PAID_PILOT_RELEASE_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "GET")
+            principal = self._query_company(query, token, user.user_id, support,
+                Permission.VIEW_BILLING, request_id, correlation_id)
+            order = self.commercial_repository.get_order(principal.tenant_id,
+                principal.company_id or "", match.group(1))
+            if order.user_id != principal.user_id:
+                self._deny(principal, Permission.VIEW_BILLING, "order owner mismatch", request_id, correlation_id)
+            state, missing = self.commercial.paid_pilot_release_gate.status(
+                principal.tenant_id, principal.company_id or "", order.order_id)
+            return ApiResponse(HTTPStatus.OK, {"paid_pilot_release": {
+                "status": state.value, "blocking_gates_pending": [kind.value for kind in missing],
+                "live_charge_allowed": state.value == "APPROVED_FOR_LIVE_CHARGE",
+            }})
+
         match = _ORDER_CHECKOUT_ROUTE.fullmatch(path)
         if match:
             principal = self._query_company(
@@ -1421,10 +1439,15 @@ class CustomerApi:
                 raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "invalid checkout retry key")
             if order.offer_code is None or order.total is None:
                 raise ApiFailure(HTTPStatus.CONFLICT, "order_unpriced", "approved priced order required")
+            if not isinstance(self.payment_provider, StripeTestPaymentProvider):
+                self.commercial.require_live_checkout(order)
             checkout = self.commercial.create_checkout(self._context(principal), order.order_id, key)
             if checkout.status is not CheckoutStatus.OPEN:
                 raise ApiFailure(HTTPStatus.CONFLICT, "checkout_closed", "checkout cannot be resumed")
             if not checkout.provider_ref:
+                if not isinstance(self.payment_provider, StripeTestPaymentProvider):
+                    self.commercial.require_live_checkout(
+                        self.commercial_repository.get_order(principal.tenant_id, principal.company_id or "", order.order_id))
                 provider_ref, redirect_url = self.payment_provider.open_checkout(
                     order=self.commercial_repository.get_order(principal.tenant_id, principal.company_id or "", order.order_id),
                     idempotency_key=f"bb:{order.order_id}:{key}",
