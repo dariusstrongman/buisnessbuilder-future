@@ -15,7 +15,7 @@ from businessbuilder.commercial import (
 )
 from businessbuilder.commercial.repository import CommercialNotFound, CommercialRepository
 from businessbuilder.commercial.pricing import OfferCode
-from businessbuilder.commercial.models import PaymentEligibility, TaxDisposition
+from businessbuilder.commercial.models import AccessSource, PaymentEligibility, TaxDisposition
 from businessbuilder.commercial.operator_authority import CommercialOperatorPrincipal
 from businessbuilder.company_brain import (
     Company,
@@ -1083,6 +1083,9 @@ class ResidentialCleaningJourneyService:
                     ),
                     "payment_eligibility": current.eligibility.value,
                     "admission_present": current.admission_id is not None,
+                    "access_source": current.access_source.value if current.access_source else None,
+                    "business_builder_fees": (0 if current.access_source is AccessSource.PILOT_ACCESS
+                                              else current.total.minor_units if current.total else None),
                 }
         entitlements = [
             {
@@ -1090,6 +1093,7 @@ class ResidentialCleaningJourneyService:
                 "code": item.entitlement_code,
                 "class": item.entitlement_class.value,
                 "status": item.status.value,
+                "provenance": item.provenance.value if item.provenance else None,
             }
             for item in self.commercial_repository.get_current_entitlement_grants(
                 scope.tenant_id, scope.company_id

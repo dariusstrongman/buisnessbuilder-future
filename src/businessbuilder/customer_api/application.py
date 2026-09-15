@@ -57,6 +57,7 @@ _ORDER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})$")
 _ORDER_CHECKOUT_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/checkout$")
 _PAID_PILOT_RELEASE_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/paid-pilot-release$")
 _ORDER_OFFER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/offer$")
+_ORDER_PILOT_ACCESS_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/pilot-access$")
 _OPERATOR_RELEASE_ROUTE = re.compile(
     r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/orders/([A-Za-z0-9_-]{1,128})/release$"
 )
@@ -193,6 +194,7 @@ class CustomerApi:
         checkout_success_url: str | None = None,
         checkout_cancel_url: str | None = None,
         commercial_operator_authority: CommercialOperatorAuthority | None = None,
+        pilot_code_reader=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -217,6 +219,7 @@ class CustomerApi:
         self.checkout_success_url = checkout_success_url
         self.checkout_cancel_url = checkout_cancel_url
         self.commercial_operator_authority = commercial_operator_authority
+        self.pilot_code_reader = pilot_code_reader
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -1398,6 +1401,29 @@ class CustomerApi:
             order = self.commercial.select_fixed_offer(self._context(principal), match.group(1), offer)
             return ApiResponse(HTTPStatus.OK, {"order": self._order(order)})
 
+        match = _ORDER_PILOT_ACCESS_ROUTE.fullmatch(path)
+        if match:
+            self._method(method, "POST")
+            principal = self._query_company(
+                query, token, user.user_id, support, Permission.AUTHORIZE_SPEND,
+                request_id, correlation_id,
+            )
+            if self.residential_cleaning is None or self.pilot_code_reader is None:
+                raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+            pilot = self.residential_cleaning.project(principal)
+            if pilot["scope_commit"]["approval_state"] != "granted" or (
+                not pilot["order"] or pilot["order"]["order_id"] != match.group(1)
+            ):
+                self._deny(principal, Permission.AUTHORIZE_SPEND,
+                           "unapproved pilot order scope", request_id, correlation_id)
+            values = self._object(body, required=set(), allowed={"code"})
+            submitted = values.get("code", "")
+            if not isinstance(submitted, str) or len(submitted.encode("utf-8")) > 128:
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "invalid pilot access input")
+            valid = self.commercial.redeem_pilot_access(
+                self._context(principal), match.group(1), submitted, self.pilot_code_reader)
+            return ApiResponse(HTTPStatus.OK, {"result": "VALID" if valid else "INVALID"})
+
         match = _PAID_PILOT_RELEASE_ROUTE.fullmatch(path)
         if match:
             self._method(method, "GET")
@@ -1508,6 +1534,8 @@ class CustomerApi:
         if _ORDER_CHECKOUT_ROUTE.fullmatch(path):
             return ("GET", "POST")
         if _ORDER_OFFER_ROUTE.fullmatch(path):
+            return ("POST",)
+        if _ORDER_PILOT_ACCESS_ROUTE.fullmatch(path):
             return ("POST",)
         if (_OPERATOR_RELEASE_ROUTE.fullmatch(path) or _OPERATOR_QUOTE_ROUTE.fullmatch(path)
             or _OPERATOR_SCOPE_ROUTE.fullmatch(path) or _EXISTING_ORDER_ROUTE.fullmatch(path)
@@ -1855,6 +1883,7 @@ class CustomerApi:
             "payment_eligibility": order.eligibility.value,
             "eligible_at": CustomerApi._time(order.eligible_at),
             "tax_disposition": order.tax_disposition.value,
+            "access_source": order.access_source.value if order.access_source else None,
         }
 
     @staticmethod
@@ -2148,7 +2177,8 @@ class CustomerApi:
                 "authority": "commercial",
                 "orders": [
                     {"order_id": item.order_id, "status": item.status.value,
-                     "offer_code": item.offer_code, "payment_eligibility": item.eligibility.value}
+                     "offer_code": item.offer_code, "payment_eligibility": item.eligibility.value,
+                     "access_source": item.access_source.value if item.access_source else None}
                     for item in orders
                 ],
                 "subscriptions": [

@@ -20,6 +20,9 @@ from .models import (
     CommercialOperatorGrant,
     CommercialEvent,
     EntitlementGrant,
+    PilotAttempt,
+    PilotRedemption,
+    AccessSource,
     Order,
     OrderAuditEvent,
     OutboxMessage,
@@ -198,6 +201,21 @@ class CommercialRepository(ABC):
     @abstractmethod
     def mark_billing_event_processed(self, provider: str, provider_event_ref: str) -> None: ...
 
+    @abstractmethod
+    def lock_pilot_scope(self, tenant_id: str, company_id: str) -> None: ...
+
+    @abstractmethod
+    def get_pilot_redemption(self, tenant_id: str, company_id: str) -> PilotRedemption | None: ...
+
+    @abstractmethod
+    def append_pilot_redemption(self, redemption: PilotRedemption) -> None: ...
+
+    @abstractmethod
+    def recent_pilot_attempts(self, tenant_id: str, company_id: str, since: datetime) -> tuple[PilotAttempt, ...]: ...
+
+    @abstractmethod
+    def append_pilot_attempt(self, attempt: PilotAttempt) -> None: ...
+
 
 class InMemoryCommercialRepository(CommercialRepository):
     """Append-versioned offline ledger with tenant-scoped reads."""
@@ -219,6 +237,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         self.entitlement_grants: dict[tuple[str, str, str], list[EntitlementGrant]] = {}
         self.release_gates: dict[tuple[str, str, str, str], list[object]] = {}
         self.release_packets: dict[tuple[str, str, str], object] = {}
+        self.pilot_redemptions: dict[tuple[str, str], PilotRedemption] = {}
+        self.pilot_attempts: list[PilotAttempt] = []
         self.audit: list[object] = []
         self.processed_events: set[tuple[str, str]] = set()
         self.outbox: dict[str, OutboxMessage] = {}
@@ -239,6 +259,8 @@ class InMemoryCommercialRepository(CommercialRepository):
         "entitlement_grants",
         "release_gates",
         "release_packets",
+        "pilot_redemptions",
+        "pilot_attempts",
         "audit",
         "processed_events",
         "outbox",
@@ -478,6 +500,27 @@ class InMemoryCommercialRepository(CommercialRepository):
             raise CommercialNotFound("order not found in scope")
         return history[-1]
 
+    def lock_pilot_scope(self, tenant_id: str, company_id: str) -> None:
+        # In-memory and SQLite transactions already serialize writers.
+        return None
+
+    def get_pilot_redemption(self, tenant_id: str, company_id: str) -> PilotRedemption | None:
+        return self.pilot_redemptions.get((tenant_id, company_id))
+
+    def append_pilot_redemption(self, redemption: PilotRedemption) -> None:
+        key = (redemption.tenant_id, redemption.company_id)
+        if key in self.pilot_redemptions:
+            raise CommercialConflict("company pilot access already redeemed")
+        self.pilot_redemptions[key] = redemption
+
+    def recent_pilot_attempts(self, tenant_id: str, company_id: str, since: datetime) -> tuple[PilotAttempt, ...]:
+        return tuple(attempt for attempt in self.pilot_attempts
+                     if attempt.tenant_id == tenant_id and attempt.company_id == company_id
+                     and attempt.occurred_at >= since)
+
+    def append_pilot_attempt(self, attempt: PilotAttempt) -> None:
+        self.pilot_attempts.append(attempt)
+
     def list_current_orders(self, tenant_id: str, company_id: str) -> tuple[Order, ...]:
         with self.lock:
             return tuple(
@@ -652,6 +695,7 @@ _COMMERCIAL_TYPES = {
     item.__name__: item
     for item in (
         Product, ProductVersion, Feature, Entitlement, Package, Order, OrderItem, CommercialQuote,
+        PilotRedemption, PilotAttempt, AccessSource,
         CommercialOperatorGrant, CommercialAdmissionRecord,
         CheckoutIntent, PaymentIntentRef, RefundRecord, CancellationRecord,
         Subscription, SubscriptionPlanRef, EntitlementGrant, OrderAuditEvent,
@@ -764,6 +808,8 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
             elif kind == "entitlement": self.entitlement_grants.setdefault((value.tenant_id, value.company_id, value.grant_id), []).append(value)
             elif kind == "release_gate": self.release_gates.setdefault((value.tenant_id, value.company_id, value.order_id, value.kind.value), []).append(value)
             elif kind == "release_packet": self.release_packets[(value.tenant_id, value.company_id, value.order_id)] = value
+            elif kind == "pilot_redemption": self.pilot_redemptions[(value.tenant_id, value.company_id)] = value
+            elif kind == "pilot_attempt": self.pilot_attempts.append(value)
         for (body,) in self.connection.execute("SELECT body FROM commercial_audit_events ORDER BY rowid"):
             self.audit.append(decode_record(body, _COMMERCIAL_TYPES))
         self.processed_events.update(self.connection.execute("SELECT provider, provider_event_ref FROM processed_billing_events"))
@@ -862,6 +908,18 @@ class SQLiteCommercialRepository(InMemoryCommercialRepository):
     def append_order(self, order: Order) -> None:
         super().append_order(order)
         self._insert("order", self._scope(order.tenant_id, order.company_id, order.order_id), order.version, order, order.tenant_id, order.company_id)
+
+    def append_pilot_redemption(self, redemption: PilotRedemption) -> None:
+        with self.transaction():
+            super().append_pilot_redemption(redemption)
+            self._insert("pilot_redemption", self._scope(redemption.tenant_id, redemption.company_id, "pilot_access_v1"),
+                         1, redemption, redemption.tenant_id, redemption.company_id)
+
+    def append_pilot_attempt(self, attempt: PilotAttempt) -> None:
+        with self.transaction():
+            super().append_pilot_attempt(attempt)
+            self._insert("pilot_attempt", self._scope(attempt.tenant_id, attempt.company_id, attempt.attempt_id),
+                         1, attempt, attempt.tenant_id, attempt.company_id)
 
     def append_quote(self, quote: CommercialQuote) -> None:
         super().append_quote(quote)

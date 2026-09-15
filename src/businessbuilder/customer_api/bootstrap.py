@@ -7,6 +7,7 @@ from businessbuilder.commercial import CommercialService, seed_default_catalog
 from businessbuilder.commercial.stripe_webhooks import StripeWebhookIngress
 from businessbuilder.commercial.operator_authority import CommercialOperatorAuthority
 from businessbuilder.commercial.paid_pilot_release import PaidPilotReleaseGate
+from businessbuilder.commercial.pilot_access import AwsPilotCodeReader
 from businessbuilder.company_brain import CompanyBrainService
 from businessbuilder.integration import (
     CompanyBrainRuntimeAdapter,
@@ -70,6 +71,7 @@ def create_postgres_customer_api(
     commercial_tax_authority_verifier=None,
     paid_pilot_release_authority_verifier=None,
     paid_pilot_packet_evidence_verifier=None,
+    pilot_code_reader=None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -172,4 +174,6 @@ def create_postgres_customer_api(
         checkout_success_url=checkout_success_url,
         checkout_cancel_url=checkout_cancel_url,
         commercial_operator_authority=commercial.operator_authority,
+        pilot_code_reader=(pilot_code_reader if pilot_code_reader is not None
+                           else AwsPilotCodeReader()),
     )

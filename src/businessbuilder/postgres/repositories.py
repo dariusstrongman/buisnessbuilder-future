@@ -367,6 +367,10 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
                     ).append(value)
                 elif kind == "release_packet":
                     self.release_packets[(value.tenant_id, value.company_id, value.order_id)] = value
+                elif kind == "pilot_redemption":
+                    self.pilot_redemptions[(value.tenant_id, value.company_id)] = value
+                elif kind == "pilot_attempt":
+                    self.pilot_attempts.append(value)
             cursor.execute(
                 "SELECT body FROM bb_commercial_audit_events ORDER BY sequence"
             )
@@ -477,6 +481,46 @@ class PostgresCommercialRepository(InMemoryCommercialRepository, _PostgresReposi
             order.tenant_id,
             order.company_id,
         )
+
+    def lock_pilot_scope(self, tenant_id: str, company_id: str) -> None:
+        # Serialize company redemption and invalid-attempt counting across API workers.
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                           (self._scope(tenant_id, company_id, "pilot_access_v1"),))
+
+    def get_pilot_redemption(self, tenant_id: str, company_id: str):
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute("SELECT body FROM bb_commercial_records WHERE kind='pilot_redemption' AND scope_key=%s",
+                           (self._scope(tenant_id, company_id, "pilot_access_v1"),))
+            row = cursor.fetchone()
+            value = decode_record(row["body"], _COMMERCIAL_TYPES) if row else None
+            if value is None:
+                self.pilot_redemptions.pop((tenant_id, company_id), None)
+            else:
+                self.pilot_redemptions[(tenant_id, company_id)] = value
+            return value
+
+    def append_pilot_redemption(self, redemption) -> None:
+        with self.transaction():
+            self.get_pilot_redemption(redemption.tenant_id, redemption.company_id)
+            super().append_pilot_redemption(redemption)
+            self._insert("pilot_redemption", self._scope(redemption.tenant_id, redemption.company_id, "pilot_access_v1"),
+                         1, redemption, redemption.tenant_id, redemption.company_id)
+
+    def recent_pilot_attempts(self, tenant_id: str, company_id: str, since):
+        with self.lock, self.connection.cursor() as cursor:
+            cursor.execute("SELECT body FROM bb_commercial_records WHERE kind='pilot_attempt' AND tenant_id=%s AND company_id=%s ORDER BY sequence",
+                           (tenant_id, company_id))
+            attempts = [decode_record(row["body"], _COMMERCIAL_TYPES) for row in cursor]
+            self.pilot_attempts = [item for item in self.pilot_attempts
+                                   if (item.tenant_id, item.company_id) != (tenant_id, company_id)] + attempts
+            return tuple(item for item in attempts if item.occurred_at >= since)
+
+    def append_pilot_attempt(self, attempt) -> None:
+        with self.transaction():
+            super().append_pilot_attempt(attempt)
+            self._insert("pilot_attempt", self._scope(attempt.tenant_id, attempt.company_id, attempt.attempt_id),
+                         1, attempt, attempt.tenant_id, attempt.company_id)
 
     def get_order(self, tenant_id: str, company_id: str, order_id: str) -> Order:
         """Privileged Checkout/release paths must not trust a startup snapshot."""

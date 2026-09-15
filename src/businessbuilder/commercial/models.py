@@ -45,6 +45,12 @@ class OrderStatus(StrEnum):
     REFUNDED = "refunded"
 
 
+class AccessSource(StrEnum):
+    STRIPE_PAYMENT = "STRIPE_PAYMENT"
+    PROVIDER_PAYMENT = "PROVIDER_PAYMENT"
+    PILOT_ACCESS = "PILOT_ACCESS"
+
+
 class CheckoutStatus(StrEnum):
     OPEN = "open"
     COMPLETED = "completed"
@@ -204,6 +210,7 @@ class Order:
     admission_id: str | None = None
     existing_audit_ref: str | None = None
     existing_recommendation_digest: str | None = None
+    access_source: AccessSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +402,28 @@ class EntitlementGrant:
     version: int = 1
     effective_until: datetime | None = None
     status_reason: str | None = None
+    provenance: AccessSource | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PilotRedemption:
+    redemption_id: str
+    tenant_id: str
+    company_id: str
+    order_id: str
+    founder_user_id: str
+    redeemed_at: datetime
+    source: AccessSource = AccessSource.PILOT_ACCESS
+
+
+@dataclass(frozen=True, slots=True)
+class PilotAttempt:
+    attempt_id: str
+    tenant_id: str
+    company_id: str
+    founder_user_id: str
+    occurred_at: datetime
+    outcome: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,7 +582,7 @@ class NormalizedBillingEvent:
 
 
 ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
-    OrderStatus.DRAFT: frozenset({OrderStatus.PENDING_PAYMENT, OrderStatus.CANCELED}),
+    OrderStatus.DRAFT: frozenset({OrderStatus.PENDING_PAYMENT, OrderStatus.FULFILLMENT_PENDING, OrderStatus.CANCELED}),
     OrderStatus.PENDING_PAYMENT: frozenset({OrderStatus.PAID, OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELED}),
     OrderStatus.PAYMENT_FAILED: frozenset({OrderStatus.PENDING_PAYMENT, OrderStatus.PAID, OrderStatus.CANCELED}),
     OrderStatus.PAID: frozenset({OrderStatus.FULFILLMENT_PENDING, OrderStatus.CANCELED, OrderStatus.REFUNDED, OrderStatus.PARTIALLY_REFUNDED}),

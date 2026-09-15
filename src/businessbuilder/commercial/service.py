@@ -11,6 +11,7 @@ from businessbuilder.identity import AuthorizationContext, AuthorizationDenied, 
 
 from .models import (
     Amount,
+    AccessSource,
     BillingMode,
     BillingPeriod,
     CancellationPolicy,
@@ -38,6 +39,8 @@ from .models import (
     TaxReviewState,
     PaymentIntentRef,
     ProductCode,
+    PilotAttempt,
+    PilotRedemption,
     RefundKind,
     RefundRecord,
     RenewalState,
@@ -52,6 +55,8 @@ from .outbox import CommercialOutboxDispatcher
 from .repository import CommercialConflict, CommercialRepository
 from .pricing import FOUNDING_PRICES, OfferCode, PriceKind
 from .operator_authority import CommercialOperatorAuthority, CommercialOperatorPrincipal
+from .pilot_access import (PilotCodeReader, PilotSecretUnavailable, code_matches,
+                           INVALID_ATTEMPT_LIMIT, INVALID_ATTEMPT_WINDOW)
 
 
 SUPPORTED_BILLING_EVENTS = frozenset(
@@ -251,6 +256,86 @@ class CommercialService:
         return changed
 
     @_transactional
+    def redeem_pilot_access(
+        self, context: AuthorizationContext, order_id: str, submitted_code: str,
+        secret_reader: PilotCodeReader,
+    ) -> bool:
+        """Atomically admit one founder-approved cleaning company without Stripe."""
+        self.authorization.require(context, Permission.AUTHORIZE_SPEND, at=self.clock())
+        if context.company_id is None:
+            raise PermissionError("company scope required")
+        tenant_id, company_id = context.tenant_id, context.company_id
+        self.repository.lock_pilot_scope(tenant_id, company_id)
+        order = self.repository.get_order(tenant_id, company_id, order_id)
+        if order.user_id != context.actor_user_id:
+            raise PermissionError("order owner mismatch")
+        redeemed = self.repository.get_pilot_redemption(tenant_id, company_id)
+        if redeemed is not None:
+            if redeemed.order_id != order_id:
+                raise CommercialConflict("company pilot access already redeemed")
+            return True
+        if order.status is not OrderStatus.DRAFT or order.checkout_intent_id is not None:
+            raise CommercialConflict("approved uncharged draft order required")
+        if not order.items or order.items[0].product_code is not ProductCode.BUILD_BUSINESS:
+            raise CommercialConflict("pilot access requires Build My Business scope")
+        recent = self.repository.recent_pilot_attempts(
+            tenant_id, company_id, self.clock() - INVALID_ATTEMPT_WINDOW)
+        if sum(item.outcome in {"INVALID", "UNAVAILABLE"} for item in recent) >= INVALID_ATTEMPT_LIMIT:
+            self._audit_order(order, context.actor_user_id, "pilot_access.rate_limited",
+                              "Pilot redemption rate limited")
+            return False
+        try:
+            configured_code = secret_reader.read_code()
+            valid = code_matches(submitted_code, configured_code)
+        except PilotSecretUnavailable:
+            # Fail closed; no submitted/configured value or AWS error is persisted.
+            self.repository.append_pilot_attempt(PilotAttempt(
+                self.id_factory("pilot_attempt"), tenant_id, company_id,
+                context.actor_user_id, self.clock(), "UNAVAILABLE"))
+            self._audit_order(order, context.actor_user_id, "pilot_access.unavailable",
+                              "Pilot access validation unavailable")
+            return False
+        if not valid:
+            self.repository.append_pilot_attempt(PilotAttempt(
+                self.id_factory("pilot_attempt"), tenant_id, company_id,
+                context.actor_user_id, self.clock(), "INVALID"))
+            self._audit_order(order, context.actor_user_id, "pilot_access.invalid",
+                              "Invalid pilot access attempt")
+            return False
+        build_version = self.repository.get_product_version(order.items[0].product_version_id)
+        run_version_id = "product_version_build_and_run_v1"
+        run_version = self.repository.get_product_version(run_version_id)
+        build_item = replace(order.items[0], unit_amount=Amount("USD", 0))
+        run_item = OrderItem(
+            self.id_factory("order_item"), ProductCode.BUILD_AND_RUN,
+            run_version_id, run_version.package.display_name, BillingMode.RECURRING,
+            1, Amount("USD", 0),
+        )
+        zero_order = replace(
+            order, items=(build_item, run_item), total=Amount("USD", 0),
+            offer_code=OfferCode.BUSINESS_RUN.value,
+            access_source=AccessSource.PILOT_ACCESS,
+        )
+        admitted = self._transition_order(
+            zero_order, OrderStatus.FULFILLMENT_PENDING,
+            context.actor_user_id, "Pilot access admitted; no payment occurred")
+        redemption = PilotRedemption(
+            self.id_factory("pilot_redemption"), tenant_id, company_id,
+            admitted.order_id, context.actor_user_id, self.clock())
+        self.repository.append_pilot_redemption(redemption)
+        self._grant_entitlements(admitted, build_version, source_subscription_id=None)
+        self._grant_entitlements(admitted, run_version, source_subscription_id=None)
+        self._audit_order(admitted, context.actor_user_id, "pilot_access.redeemed",
+                          "Company pilot access granted", target_type="pilot_redemption",
+                          target_id=redemption.redemption_id,
+                          metadata={"source": AccessSource.PILOT_ACCESS.value})
+        self._emit("commercial.fulfillment.eligible", admitted, context.actor_user_id,
+                   {"order_id": admitted.order_id,
+                    "product_codes": [item.product_code.value for item in admitted.items],
+                    "source": AccessSource.PILOT_ACCESS.value})
+        return True
+
+    @_transactional
     def create_existing_business_order(
         self, context: AuthorizationContext, *, audit_ref: str,
         recommendation_digest: str, order_id: str | None = None,
@@ -373,6 +458,8 @@ class CommercialService:
         order = self.repository.get_order(context.tenant_id, context.company_id, order_id)
         if order.user_id != context.actor_user_id:
             raise PermissionError("order owner mismatch")
+        if order.access_source is AccessSource.PILOT_ACCESS:
+            raise CommercialConflict("pilot access is not a payable checkout")
         existing = self.repository.get_checkout_by_idempotency(context.tenant_id, context.company_id, idempotency_key)
         if existing:
             if existing.order_id != order_id:
@@ -751,7 +838,9 @@ class CommercialService:
             event.payment_provider_ref, "succeeded", event.amount or order.total, event.occurred_at,
         )
         self.repository.save_payment(payment)
-        paid = replace(order, payment_intent_ref=payment.payment_ref_id)
+        paid = replace(order, payment_intent_ref=payment.payment_ref_id,
+                       access_source=(AccessSource.STRIPE_PAYMENT if event.provider == "stripe"
+                                      else AccessSource.PROVIDER_PAYMENT))
         paid = self._transition_order(paid, OrderStatus.PAID, event.provider, "Provider reported payment success")
         pending = self._transition_order(paid, OrderStatus.FULFILLMENT_PENDING, "commercial_service", "Paid order is eligible for fulfillment")
         for item in pending.items:
@@ -910,6 +999,7 @@ class CommercialService:
                 self.id_factory("entitlement_grant"), order.tenant_id, order.user_id, order.company_id,
                 definition.entitlement_code, definition.entitlement_class, EntitlementStatus.ACTIVE,
                 order.order_id, source_subscription_id, self.clock(), self.clock(),
+                provenance=order.access_source,
             )
             self.repository.append_entitlement_grant(grant)
             self._audit_order(order, "commercial_service", "entitlement.granted", "Entitlement activated", target_type="entitlement_grant", target_id=grant.grant_id, metadata={"entitlement_code": grant.entitlement_code, "class": grant.entitlement_class.value})
