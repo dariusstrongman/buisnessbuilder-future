@@ -34,6 +34,7 @@ PUBLIC_ASSETS = {
     "/styles.css": "/styles.css",
 }
 PROOF_ENVIRONMENTS = frozenset({"development", "local", "test"})
+STRIPE_TEST_ENVIRONMENTS = frozenset({"pilot", "development", "local", "test"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
@@ -41,6 +42,16 @@ def _proof_endpoints_enabled() -> bool:
     enabled = os.environ.get("ENABLE_PROOF_ENDPOINTS", "").strip().lower()
     environment = os.environ.get("ENVIRONMENT", ENVIRONMENT).strip().lower()
     return enabled in {"1", "true", "yes"} and environment in PROOF_ENVIRONMENTS
+
+
+def _stripe_test_checkout_enabled(*, configured: bool) -> bool:
+    enabled = os.environ.get("PILOT_SUPERVISED_STRIPE_TEST", "").strip().lower() in {"1", "true", "yes"}
+    if not enabled:
+        return False
+    environment = os.environ.get("ENVIRONMENT", ENVIRONMENT).strip().lower()
+    if environment not in STRIPE_TEST_ENVIRONMENTS or not configured:
+        raise RuntimeError("isolated Stripe test checkout requires pilot configuration")
+    return True
 
 
 def _database_health() -> None:
@@ -427,10 +438,12 @@ if __name__ == "__main__":
         StripeTestPaymentProvider(api_key=stripe_key, webhook_secret=stripe_webhook)
         if stripe_key and stripe_webhook else None
     )
+    test_checkout = _stripe_test_checkout_enabled(configured=payment_provider is not None)
     server.customer_api = create_postgres_customer_api(
         signing_key=signing_key,
         founder_authentication_provider=cognito_authentication_from_environment(),
         payment_provider=payment_provider,
+        enable_residential_cleaning_test_checkout=test_checkout,
         checkout_success_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_SUCCESS_URL"),
         checkout_cancel_url=os.environ.get("BUSINESS_BUILDER_CHECKOUT_CANCEL_URL"),
     )
