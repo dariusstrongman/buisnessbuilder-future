@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 import re
 from typing import Any, Callable, Mapping
@@ -88,6 +88,9 @@ _AUTH_SESSION_ROUTE = "/api/v1/auth/sessions"
 _AUTH_ROTATE_ROUTE = "/api/v1/auth/sessions/rotate"
 _AUTH_REVOKE_ROUTE = "/api/v1/auth/sessions/revoke"
 _AUTH_SUPPORT_ROUTE = "/api/v1/auth/support-sessions"
+_PILOT_SUPPORT_GRANT_ROUTE = re.compile(
+    r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot/support-grants$"
+)
 _CLEANING_PILOT_START_ROUTE = "/api/v1/pilots/residential-cleaning/intakes"
 _CLEANING_PILOT_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot(?:/(approve))?$"
@@ -332,6 +335,56 @@ class CustomerApi:
             )
 
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        pilot_grant = _PILOT_SUPPORT_GRANT_ROUTE.fullmatch(path)
+        if pilot_grant:
+            self._method(method, "POST")
+            company_id = pilot_grant.group(1)
+            principal = self._company_principal(
+                token, user.user_id, company_id, support,
+                Permission.REQUEST_SUPPORT, request_id, correlation_id,
+            )
+            if support or principal.role is not Role.OWNER:
+                self._audit_denial(
+                    user.user_id, principal.tenant_id, company_id,
+                    Permission.REQUEST_SUPPORT.value, "founder owner required",
+                    request_id, correlation_id,
+                )
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted")
+            values = self._object(
+                body, required={"support_user_id", "reason", "duration_minutes"},
+                allowed={"support_user_id", "reason", "duration_minutes"},
+            )
+            support_user_id = self._identifier(values["support_user_id"], "support_user_id")
+            reason = self._short_string(values["reason"], 500)
+            minutes = values["duration_minutes"]
+            if type(minutes) is not int or not 1 <= minutes <= 10_080:
+                raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "duration_minutes is invalid")
+            from businessbuilder.identity import IdentityService
+            identity = IdentityService(
+                self.identity_repository, id_factory=self.id_factory, clock=self.clock,
+            )
+            try:
+                grant = identity.grant_support_access(
+                    self._context(principal), support_user_id,
+                    frozenset({Permission.VIEW_COMPANY_STATE, Permission.ACCESS_ARTIFACTS}),
+                    timedelta(minutes=minutes), reason, company_id=company_id,
+                )
+            except (IdentityError, LookupError, PermissionError, ValueError) as exc:
+                self._audit_denial(
+                    user.user_id, principal.tenant_id, company_id,
+                    Permission.REQUEST_SUPPORT.value, type(exc).__name__,
+                    request_id, correlation_id,
+                )
+                raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operation is not permitted") from None
+            return ApiResponse(
+                HTTPStatus.CREATED,
+                {
+                    "grant_id": grant.grant_id,
+                    "company_id": grant.company_id,
+                    "permissions": sorted(item.value for item in grant.permissions),
+                    "expires_at": grant.ends_at.isoformat(),
+                },
+            )
         if path == _CLEANING_PILOT_START_ROUTE:
             self._method(method, "POST")
             if self.residential_cleaning is None:
@@ -1129,6 +1182,8 @@ class CustomerApi:
         if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
             return ("POST",)
         if path == _CLEANING_PILOT_START_ROUTE:
+            return ("POST",)
+        if _PILOT_SUPPORT_GRANT_ROUTE.fullmatch(path):
             return ("POST",)
         cleaning_pilot = _CLEANING_PILOT_ROUTE.fullmatch(path)
         if cleaning_pilot:

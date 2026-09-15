@@ -13,7 +13,7 @@
   "containerDefinitions": [
     {
       "name": "backend",
-      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:0a680aff94e3109465836e707988b3ac3aeaa1b7f2ef2725e35a3dbbf5fe521a",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:42ca2055bd2acb39bdbb8fc2e2a36442d030eaa6c99ffc92485f9eddafe4ed2d",
       "essential": true,
       "readonlyRootFilesystem": true,
       "linuxParameters": {"initProcessEnabled": true},
@@ -53,7 +53,7 @@
     },
     {
       "name": "site",
-      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:ca745555c4394dd005ab0829598895e27eb048ae740789e26aca98bc6dd0f3e4",
+      "image": "199949321335.dkr.ecr.us-east-1.amazonaws.com/businessbuilder-staging-app@sha256:fe327787100d2cb4f5e41dbd9c1b1c4add823a4f9fa7e879e2116ed2bd65dd14",
       "essential": true,
       "readonlyRootFilesystem": true,
       "linuxParameters": {"initProcessEnabled": true},

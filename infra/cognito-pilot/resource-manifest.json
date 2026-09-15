@@ -19,11 +19,11 @@
   "compute": {
     "cluster": "businessbuilder-staging",
     "service": "businessbuilder-pilot-auth",
-    "task_definition": "businessbuilder-pilot-auth-v1:5",
+    "task_definition": "businessbuilder-pilot-auth-v1:7",
     "cpu_units": 512,
     "memory_mib": 1024,
-    "backend_image_digest": "sha256:0a680aff94e3109465836e707988b3ac3aeaa1b7f2ef2725e35a3dbbf5fe521a",
-    "site_image_digest": "sha256:ca745555c4394dd005ab0829598895e27eb048ae740789e26aca98bc6dd0f3e4"
+    "backend_image_digest": "sha256:42ca2055bd2acb39bdbb8fc2e2a36442d030eaa6c99ffc92485f9eddafe4ed2d",
+    "site_image_digest": "sha256:fe327787100d2cb4f5e41dbd9c1b1c4add823a4f9fa7e879e2116ed2bd65dd14"
   },
   "network": {
     "load_balancer_security_group": "sg-032127bbe48017714",

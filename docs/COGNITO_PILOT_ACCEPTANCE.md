@@ -34,7 +34,7 @@ No value belongs in source, logs, documentation, browser-readable JavaScript, or
 
 - Two synthetic disposable test inboxes completed real Cognito signup email verification. [mail.tm](https://docs.mail.tm/) was used only for the synthetic inbox and is credited per its API terms.
 - Founder: Managed Login, internal session establishment, existing organization/OWNER/company bootstrap, persisted residential-cleaning entry, repeat/idempotent intake, refresh rotation, logout, revoked refresh-family rejection, revoked internal-session rejection, login again, and provider-native recovery passed.
-- Operator: Managed Login first produced zero customer authority. A persisted SUPPORT membership plus company-scoped eight-hour grant then permitted only the evidence-review path. A forged grant, an expired grant, and commercial access were denied.
+- Operator: Managed Login first produced zero customer authority. A separately provisioned internal SUPPORT membership remained inert until the Cognito-authenticated founder created a company-scoped eight-hour grant through the narrow residential-cleaning customer API. The operator independently established the audited support session, accessed only the evidence-review view, and was denied billing. A forged grant and an expired grant were denied.
 - Real-provider failures: unverified email, disabled account login, user-existence probing, forged state, wrong nonce, expired state, forged tenant/company headers, cross-company object access, and revoked-session reuse failed closed.
 - Verification remained authoritative: the functioning integration left both Ready and Fully Set false.
 - Restart persistence: founder/company/journey state and support membership/grants survived task replacement and were reloaded from the isolated PostgreSQL schema.
@@ -46,7 +46,7 @@ Synthetic identity email addresses, passwords, verification/recovery codes, acce
 1. Replace the disposable verification inbox path with an approved production email-delivery setup and branded sender.
 2. Approve and enforce MFA policy, especially for operator identities; complete passkey decision separately.
 3. Automate or formally runbook provider disable/delete reconciliation into internal user/session revocation. Current short internal-session lifetime bounds but does not eliminate that delay.
-4. Replace out-of-band pilot support provisioning with an approved founder-facing grant workflow or audited operator process that updates running repository views safely.
+4. The authenticated founder grant route now exists for this pilot. Replace out-of-band SUPPORT membership provisioning with an audited operator lifecycle and ensure external changes to PostgreSQL identity records invalidate running repository views promptly.
 5. Add WAF/rate controls, alarms, CloudTrail/CloudWatch retention, and account-level incident runbooks before public exposure.
 6. Replace the default CloudFront hostname with an approved product domain/certificate only after DNS authorization.
 7. Complete legal/privacy review for identity records and retention.

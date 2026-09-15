@@ -152,3 +152,47 @@ class TestProductionAuthApi:
             body={"grant_id": grant.grant_id, "reason": "stale retry"},
         )
         assert expired.status in {401, 403}
+
+    def test_founder_grant_route_derives_owner_and_narrows_company_scope(self) -> None:
+        support, support_token = self.fixture._member(Role.SUPPORT, "support")
+        path = (
+            f"/api/v1/companies/{self.fixture.company_id}/"
+            "residential-cleaning-pilot/support-grants"
+        )
+        body = {
+            "support_user_id": support.user_id,
+            "reason": "Review pilot evidence with my consent",
+            "duration_minutes": 60,
+        }
+        forged = self.request(
+            path, authorization=self.fixture.owner_token,
+            headers={"X-Tenant-ID": "tenant_forged", "X-Actor-Role": "owner"},
+            body=body,
+        )
+        assert forged.status == 403
+        denied_support = self.request(path, authorization=support_token, body=body)
+        assert denied_support.status in {403, 404}
+        wrong_company = self.request(
+            "/api/v1/companies/company_other_tenant/residential-cleaning-pilot/support-grants",
+            authorization=self.fixture.owner_token, body=body,
+        )
+        assert wrong_company.status in {403, 404}
+        forged_permissions = self.request(
+            path, authorization=self.fixture.owner_token,
+            body={**body, "permissions": ["billing.view", "founder_decision.approve"]},
+        )
+        assert forged_permissions.status == 400
+        granted = self.request(path, authorization=self.fixture.owner_token, body=body)
+        assert granted.status == 201
+        assert granted.body["permissions"] == ["artifacts.access", "company.view"]
+        persisted = self.fixture.identity_repository.get_support_grant(granted.body["grant_id"])
+        assert persisted.approved_by_user_id == self.fixture.owner.user_id
+        assert persisted.company_id == self.fixture.company_id
+        assert persisted.support_user_id == support.user_id
+        assert Permission.APPROVE_FOUNDER_DECISIONS not in persisted.permissions
+        assert Permission.VIEW_BILLING not in persisted.permissions
+        assert any(
+            item.action == "authorization.denied"
+            and item.target_id == Permission.REQUEST_SUPPORT.value
+            for item in self.fixture.identity_repository.audit_events
+        )
