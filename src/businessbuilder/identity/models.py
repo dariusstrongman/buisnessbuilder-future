@@ -61,6 +61,8 @@ class User:
     email_verified_at: datetime | None = None
     created_at: datetime = field(default_factory=utc_now)
     deactivated_at: datetime | None = None
+    authentication_provider: str | None = None
+    provider_subject_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,10 @@ class Session:
     expires_at: datetime
     revoked_at: datetime | None = None
     mfa_satisfied: bool = False
+    provider_name: str | None = None
+    provider_session_digest: str | None = None
+    rotated_from_session_id: str | None = None
+    revocation_reason: str | None = None
 
     def active_at(self, at: datetime) -> bool:
         return self.revoked_at is None and self.expires_at > at

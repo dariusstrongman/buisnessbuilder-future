@@ -36,6 +36,9 @@ class IdentityRepository(ABC):
     def get_user_by_email(self, email: str) -> User | None: ...
 
     @abstractmethod
+    def get_user_by_external_identity(self, provider: str, subject_digest: str) -> User | None: ...
+
+    @abstractmethod
     def add_founder_profile(self, profile: FounderProfile) -> None: ...
 
     @abstractmethod
@@ -90,6 +93,9 @@ class IdentityRepository(ABC):
     def get_session_by_digest(self, token_digest: str) -> Session | None: ...
 
     @abstractmethod
+    def sessions_for_user(self, user_id: str) -> tuple[Session, ...]: ...
+
+    @abstractmethod
     def save_recovery(self, request: AccountRecoveryRequest) -> None: ...
 
     @abstractmethod
@@ -134,12 +140,29 @@ class InMemoryIdentityRepository(IdentityRepository):
         with self._lock:
             if user.user_id in self.users or self.get_user_by_email(user.email):
                 raise IdentityConflict("user id or email already exists")
+            if (
+                user.authentication_provider
+                and user.provider_subject_digest
+                and self.get_user_by_external_identity(
+                    user.authentication_provider, user.provider_subject_digest
+                ) is not None
+            ):
+                raise IdentityConflict("external identity already exists")
             self.users[user.user_id] = user
 
     def save_user(self, user: User) -> None:
         with self._lock:
             if user.user_id not in self.users:
                 raise IdentityNotFound("user not found")
+            conflict = self.get_user_by_email(user.email)
+            if conflict is not None and conflict.user_id != user.user_id:
+                raise IdentityConflict("email already exists")
+            if user.authentication_provider and user.provider_subject_digest:
+                external = self.get_user_by_external_identity(
+                    user.authentication_provider, user.provider_subject_digest
+                )
+                if external is not None and external.user_id != user.user_id:
+                    raise IdentityConflict("external identity already exists")
             self.users[user.user_id] = user
 
     def get_user(self, user_id: str) -> User:
@@ -151,6 +174,16 @@ class InMemoryIdentityRepository(IdentityRepository):
     def get_user_by_email(self, email: str) -> User | None:
         normalized = email.strip().lower()
         return next((user for user in self.users.values() if user.email == normalized), None)
+
+    def get_user_by_external_identity(self, provider: str, subject_digest: str) -> User | None:
+        return next(
+            (
+                user for user in self.users.values()
+                if user.authentication_provider == provider
+                and user.provider_subject_digest == subject_digest
+            ),
+            None,
+        )
 
     def add_founder_profile(self, profile: FounderProfile) -> None:
         with self._lock:
@@ -276,6 +309,9 @@ class InMemoryIdentityRepository(IdentityRepository):
 
     def get_session_by_digest(self, token_digest: str) -> Session | None:
         return next((item for item in self.sessions.values() if item.token_digest == token_digest), None)
+
+    def sessions_for_user(self, user_id: str) -> tuple[Session, ...]:
+        return tuple(item for item in self.sessions.values() if item.user_id == user_id)
 
     def save_recovery(self, request: AccountRecoveryRequest) -> None:
         with self._lock:

@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 
 
-MIGRATION_VERSION = 8
+MIGRATION_VERSION = 9
 MIGRATION_LOCK_KEY = 1_785_369_922
 
 
@@ -24,6 +24,17 @@ CREATE TABLE IF NOT EXISTS bb_identity_records (
 );
 CREATE INDEX IF NOT EXISTS bb_identity_records_tenant
     ON bb_identity_records (tenant_id, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS bb_identity_user_email
+    ON bb_identity_records ((lower(body::jsonb #>> '{fields,email}')))
+    WHERE kind = 'user';
+CREATE UNIQUE INDEX IF NOT EXISTS bb_identity_external_subject
+    ON bb_identity_records (
+        (body::jsonb #>> '{fields,authentication_provider}'),
+        (body::jsonb #>> '{fields,provider_subject_digest}')
+    )
+    WHERE kind = 'user'
+      AND (body::jsonb #>> '{fields,authentication_provider}') IS NOT NULL
+      AND (body::jsonb #>> '{fields,provider_subject_digest}') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS bb_identity_audit_events (
     sequence BIGSERIAL UNIQUE,
     audit_event_id TEXT PRIMARY KEY,

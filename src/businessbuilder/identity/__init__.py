@@ -7,7 +7,18 @@ from .models import (
     Membership, MembershipStatus, Organization, OrganizationStatus, Permission, Role, Session,
     SupportAccessGrant, SupportImpersonationSession, Tenant, TenantStatus, User, UserStatus,
 )
-from .ports import AuthenticationProvider, FakeDevAuthenticationProvider, FutureMfaProvider
+from .ports import (
+    AuthenticationProvider,
+    ExternalIdentityProvider,
+    FakeDevAuthenticationProvider,
+    FutureMfaProvider,
+    VerifiedExternalIdentity,
+)
+from .production_auth import (
+    CognitoAuthenticationAdapter,
+    ProductionFounderSessionService,
+    cognito_authentication_from_environment,
+)
 from .principal import AuthenticatedPrincipal, PrincipalContextAuthority
 from .repository import IdentityRepository, InMemoryIdentityRepository, SQLiteIdentityRepository
 from .service import IdentityService, SessionService
@@ -15,12 +26,15 @@ from .service import IdentityService, SessionService
 __all__ = [
     "AccountRecoveryRequest", "AuthenticationProvider", "AuthorizationContext",
     "AuthenticatedPrincipal", "AuthorizationDenied", "AuthorizationPolicy",
+    "CognitoAuthenticationAdapter", "ExternalIdentityProvider",
+    "cognito_authentication_from_environment",
     "FakeDevAuthenticationProvider",
     "FounderProfile", "FutureMfaProvider", "IdentityAuditEvent", "IdentityConflict",
     "IdentityError", "IdentityNotFound", "IdentityRepository", "IdentityService",
     "InMemoryIdentityRepository", "SQLiteIdentityRepository", "InvalidIdentityTransition", "Membership",
     "MembershipStatus", "Organization", "OrganizationStatus", "Permission",
-    "PrincipalContextAuthority", "ROLE_PERMISSIONS", "Role",
+    "PrincipalContextAuthority", "ProductionFounderSessionService", "ROLE_PERMISSIONS", "Role",
     "SUPPORT_NEVER_ALLOWED", "Session", "SessionService", "SupportAccessGrant",
     "SupportImpersonationSession", "Tenant", "TenantStatus", "User", "UserStatus",
+    "VerifiedExternalIdentity",
 ]

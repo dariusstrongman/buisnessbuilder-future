@@ -27,7 +27,11 @@ from businessbuilder.verification import (
     billy_bob_policy,
     default_registry,
 )
-from businessbuilder.identity import AuthorizationPolicy, PrincipalContextAuthority
+from businessbuilder.identity import (
+    AuthorizationPolicy,
+    PrincipalContextAuthority,
+    ProductionFounderSessionService,
+)
 from businessbuilder.residential_cleaning import (
     ResidentialCleaningJourneyService,
     ResidentialCleaningVerificationRouter,
@@ -53,6 +57,7 @@ def create_postgres_customer_api(
     residential_cleaning_evidence_verifier=None,
     residential_cleaning_evidence_store=None,
     residential_cleaning_malware_scanner=None,
+    founder_authentication_provider=None,
     clock=utc_now,
 ) -> CustomerApi:
     """Production-shaped composition root; authentication provider remains external."""
@@ -106,6 +111,16 @@ def create_postgres_customer_api(
         evidence_store=residential_cleaning_evidence_store,
         malware_scanner=residential_cleaning_malware_scanner,
     )
+    founder_authentication = (
+        ProductionFounderSessionService(
+            identity_repository,
+            founder_authentication_provider,
+            id_factory=random_id,
+            clock=clock,
+        )
+        if founder_authentication_provider is not None
+        else None
+    )
     return CustomerApi(
         identity_repository=identity_repository,
         principal_authority=authority,
@@ -124,4 +139,5 @@ def create_postgres_customer_api(
         communications_compliance=communications_compliance,
         live_canary_readiness=live_canary_readiness,
         residential_cleaning=residential_cleaning,
+        founder_authentication=founder_authentication,
     )

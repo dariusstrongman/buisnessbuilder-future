@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from businessbuilder.customer_api.bootstrap import create_postgres_customer_api
+from businessbuilder.identity import cognito_authentication_from_environment
 from businessbuilder.postgres.cloud_proof import get_cloud_proof, run_cloud_proof
 from businessbuilder.postgres.connection import connect_postgres
 from businessbuilder.postgres.migrations import migrate
@@ -416,6 +417,9 @@ if __name__ == "__main__":
         raise RuntimeError("CUSTOMER_API_PRINCIPAL_KEY must contain at least 32 bytes")
     port = int(os.environ.get("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), StagingHandler)
-    server.customer_api = create_postgres_customer_api(signing_key=signing_key)
+    server.customer_api = create_postgres_customer_api(
+        signing_key=signing_key,
+        founder_authentication_provider=cognito_authentication_from_environment(),
+    )
     print(f"Business Builder staging listening on :{port}", flush=True)
     server.serve_forever()

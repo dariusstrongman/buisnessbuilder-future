@@ -84,6 +84,10 @@ _ERASURE_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/recipients/([A-Za-z0-9_.:-]{3,160})/erasure$"
 )
 _PUBLIC_UNSUBSCRIBE_ROUTE = "/api/v1/communications/unsubscribe"
+_AUTH_SESSION_ROUTE = "/api/v1/auth/sessions"
+_AUTH_ROTATE_ROUTE = "/api/v1/auth/sessions/rotate"
+_AUTH_REVOKE_ROUTE = "/api/v1/auth/sessions/revoke"
+_AUTH_SUPPORT_ROUTE = "/api/v1/auth/support-sessions"
 _CLEANING_PILOT_START_ROUTE = "/api/v1/pilots/residential-cleaning/intakes"
 _CLEANING_PILOT_ROUTE = re.compile(
     r"^/api/v1/companies/([A-Za-z0-9_-]{1,128})/residential-cleaning-pilot(?:/(approve))?$"
@@ -152,6 +156,7 @@ class CustomerApi:
         communications_compliance=None,
         live_canary_readiness=None,
         residential_cleaning=None,
+        founder_authentication=None,
     ) -> None:
         self.identity_repository = identity_repository
         self.principal_authority = principal_authority
@@ -170,6 +175,7 @@ class CustomerApi:
         self.communications_compliance = communications_compliance
         self.live_canary_readiness = live_canary_readiness
         self.residential_cleaning = residential_cleaning
+        self.founder_authentication = founder_authentication
 
     def close(self) -> None:
         """Close unique repository resources owned by the composition root."""
@@ -204,6 +210,61 @@ class CustomerApi:
         raw_token: str | None = None
         actor_id = "unknown"
         try:
+            if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
+                self._method(method, "POST")
+                if self.founder_authentication is None:
+                    raise ApiFailure(HTTPStatus.NOT_FOUND, "not_found", "resource not found")
+                if any(lowered.get(name) for name in _FORGED_AUTHORITY_HEADERS):
+                    raise ApiFailure(
+                        HTTPStatus.FORBIDDEN,
+                        "forbidden",
+                        "request authority is server-derived",
+                    )
+                if path == _AUTH_SESSION_ROUTE:
+                    values = self._object(
+                        body, required={"access_token"}, allowed={"access_token"}
+                    )
+                    user, session, issued = self.founder_authentication.establish(
+                        self._short_string(values["access_token"], 16_384)
+                    )
+                    return ApiResponse(
+                        HTTPStatus.CREATED,
+                        self._auth_session_response(user, session, issued),
+                    )
+                raw_token = self._bearer(lowered.get("authorization"))
+                if path == _AUTH_SUPPORT_ROUTE:
+                    values = self._object(
+                        body,
+                        required={"grant_id", "reason"},
+                        allowed={"grant_id", "reason"},
+                    )
+                    support = self.founder_authentication.start_support_session(
+                        raw_token,
+                        self._identifier(values["grant_id"], "grant_id"),
+                        self._short_string(values["reason"], 500),
+                    )
+                    return ApiResponse(
+                        HTTPStatus.CREATED,
+                        {
+                            "support_session_id": support.impersonation_session_id,
+                            "company_id": support.company_id,
+                            "expires_at": support.ends_at.isoformat(),
+                        },
+                    )
+                if path == _AUTH_ROTATE_ROUTE:
+                    values = self._object(
+                        body, required={"access_token"}, allowed={"access_token"}
+                    )
+                    user, session, issued = self.founder_authentication.rotate(
+                        raw_token, self._short_string(values["access_token"], 16_384)
+                    )
+                    return ApiResponse(
+                        HTTPStatus.OK,
+                        self._auth_session_response(user, session, issued),
+                    )
+                self._object(body, required=set(), allowed=set())
+                self.founder_authentication.revoke(raw_token)
+                return ApiResponse(HTTPStatus.OK, {"status": "revoked"})
             if path == _PUBLIC_UNSUBSCRIBE_ROUTE:
                 self._method(method, "POST")
                 if self.communications_compliance is None:
@@ -1065,6 +1126,8 @@ class CustomerApi:
     @staticmethod
     def allowed_methods(path: str) -> tuple[str, ...]:
         """Return only methods supported by a recognized customer route."""
+        if path in {_AUTH_SESSION_ROUTE, _AUTH_ROTATE_ROUTE, _AUTH_REVOKE_ROUTE, _AUTH_SUPPORT_ROUTE}:
+            return ("POST",)
         if path == _CLEANING_PILOT_START_ROUTE:
             return ("POST",)
         cleaning_pilot = _CLEANING_PILOT_ROUTE.fullmatch(path)
@@ -1126,6 +1189,23 @@ class CustomerApi:
         ):
             return ("GET",)
         return ()
+
+    @staticmethod
+    def _auth_session_response(user, session, raw_token: str) -> dict[str, Any]:
+        return {
+            "session_token": raw_token,
+            "session": {
+                "session_id": session.session_id,
+                "created_at": session.created_at.isoformat(),
+                "expires_at": session.expires_at.isoformat(),
+            },
+            "user": {
+                "user_id": user.user_id,
+                "email": user.email,
+                "email_verified": user.email_verified_at is not None,
+                "status": user.status.value,
+            },
+        }
 
     @staticmethod
     def _object(body: object, *, required=frozenset(), allowed=frozenset()) -> dict[str, Any]:

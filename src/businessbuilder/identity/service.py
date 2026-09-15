@@ -52,11 +52,18 @@ class IdentityService:
         self.repository.add_user(user)
         return user
 
-    def create_founder_profile(self, user_id: str, display_name: str) -> FounderProfile:
+    def create_founder_profile(
+        self, user_id: str, display_name: str, *, founder_profile_id: str | None = None
+    ) -> FounderProfile:
         if not display_name.strip():
             raise ValueError("founder display name required")
         self.repository.get_user(user_id)
-        profile = FounderProfile(self.id_factory("founder"), user_id, display_name.strip(), self.clock())
+        profile = FounderProfile(
+            founder_profile_id or self.id_factory("founder"),
+            user_id,
+            display_name.strip(),
+            self.clock(),
+        )
         self.repository.add_founder_profile(profile)
         return profile
 
@@ -270,6 +277,9 @@ class IdentityService:
         grant = self.repository.get_support_grant(grant_id)
         if grant.support_user_id != support_user_id or not grant.active_at(now):
             raise AuthorizationDenied("active matching support grant required")
+        membership = self.repository.get_active_membership(grant.tenant_id, support_user_id)
+        if membership is None or membership.role is not Role.SUPPORT:
+            raise AuthorizationDenied("active support membership required")
         if not reason.strip():
             raise ValueError("support session reason required")
         session = SupportImpersonationSession(
@@ -341,6 +351,37 @@ class SessionService:
         self.repository.save_session(session)
         return session, raw_token
 
+    def issue_for_user(
+        self,
+        user_id: str,
+        *,
+        provider_name: str,
+        provider_session_id: str,
+        lifetime: timedelta = timedelta(minutes=15),
+        rotated_from_session_id: str | None = None,
+    ) -> tuple[Session, str]:
+        """Issue an opaque internal session after a trusted provider assertion."""
+        user = self.repository.get_user(user_id)
+        if user.status is not UserStatus.ACTIVE or user.email_verified_at is None:
+            raise AuthorizationDenied("active verified user required")
+        if not provider_name or not provider_session_id:
+            raise AuthorizationDenied("trusted provider session required")
+        raw_token = secrets.token_urlsafe(32)
+        now = self.clock()
+        session = Session(
+            self.id_factory("session"),
+            user_id,
+            _digest(raw_token),
+            now,
+            now + lifetime,
+            provider_name=provider_name,
+            provider_session_digest=_digest(provider_session_id),
+            rotated_from_session_id=rotated_from_session_id,
+        )
+        self.repository.save_session(session)
+        self._audit(user, "session.established", session, "Verified external identity established session")
+        return session, raw_token
+
     def validate_token(self, raw_token: str) -> User:
         session = self.repository.get_session_by_digest(_digest(raw_token))
         if session is None or not session.active_at(self.clock()):
@@ -350,10 +391,54 @@ class SessionService:
             raise AuthorizationDenied("deactivated user")
         return user
 
-    def sign_out(self, raw_token: str) -> None:
+    def sign_out(self, raw_token: str, *, reason: str = "User signed out") -> None:
         session = self.repository.get_session_by_digest(_digest(raw_token))
         if session is not None and session.revoked_at is None:
-            self.repository.save_session(replace(session, revoked_at=self.clock()))
+            changed = replace(session, revoked_at=self.clock(), revocation_reason=reason)
+            self.repository.save_session(changed)
+            self._audit(
+                self.repository.get_user(session.user_id),
+                "session.revoked",
+                changed,
+                reason,
+            )
+
+    def rotate(
+        self,
+        raw_token: str,
+        *,
+        provider_name: str,
+        provider_session_id: str,
+        lifetime: timedelta = timedelta(minutes=15),
+    ) -> tuple[Session, str]:
+        current = self.repository.get_session_by_digest(_digest(raw_token))
+        user = self.validate_token(raw_token)
+        if current is None:
+            raise AuthorizationDenied("invalid or expired session")
+        # Revoke first so a storage failure can only force reauthentication;
+        # it can never leave both security-sensitive sessions active.
+        self.sign_out(raw_token, reason="Session rotated")
+        replacement, replacement_token = self.issue_for_user(
+            user.user_id,
+            provider_name=provider_name,
+            provider_session_id=provider_session_id,
+            lifetime=lifetime,
+            rotated_from_session_id=current.session_id,
+        )
+        return replacement, replacement_token
+
+    def revoke_user_sessions(self, user_id: str, *, reason: str) -> int:
+        revoked = 0
+        for session in tuple(self.repository.sessions_for_user(user_id)):
+            if session.revoked_at is None:
+                self.repository.save_session(
+                    replace(session, revoked_at=self.clock(), revocation_reason=reason)
+                )
+                revoked += 1
+        if revoked:
+            user = self.repository.get_user(user_id)
+            self._audit(user, "session.all_revoked", None, reason, {"count": revoked})
+        return revoked
 
     def request_recovery(self, email: str, *, lifetime: timedelta = timedelta(minutes=30)) -> str | None:
         user = self.repository.get_user_by_email(email.strip().lower())
@@ -385,6 +470,34 @@ class SessionService:
         changed = replace(user, email_verified_at=self.clock())
         self.repository.save_user(changed)
         return changed
+
+    def _audit(
+        self,
+        user: User,
+        action: str,
+        session: Session | None,
+        reason: str,
+        metadata: dict | None = None,
+    ) -> None:
+        memberships = tuple(
+            item for item in self.repository.list_user_memberships(user.user_id)
+            if item.status is MembershipStatus.ACTIVE
+        )
+        tenant_id = memberships[0].tenant_id if len(memberships) == 1 else "unresolved"
+        self.repository.append_audit(
+            IdentityAuditEvent(
+                self.id_factory("identity_audit"),
+                tenant_id,
+                user.user_id,
+                action,
+                "session",
+                session.session_id if session else user.user_id,
+                self.clock(),
+                reason,
+                "businessbuilder.identity.production_auth",
+                metadata=metadata or {},
+            )
+        )
 
 
 def _digest(value: str) -> str:

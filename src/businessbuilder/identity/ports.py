@@ -1,6 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedExternalIdentity:
+    """Minimal identity returned after a production provider validates a token."""
+
+    provider: str
+    subject: str
+    email: str
+    email_verified: bool
+    display_name: str
+    authenticated_at: datetime
+    provider_session_id: str
+
+
+class ExternalIdentityProvider(Protocol):
+    """Provider-neutral assertion verifier; provider roles are never imported."""
+
+    name: str
+
+    def verify_access_token(self, access_token: str) -> VerifiedExternalIdentity: ...
 
 
 class AuthenticationProvider(Protocol):
