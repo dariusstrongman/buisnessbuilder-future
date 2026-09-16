@@ -108,6 +108,10 @@ class IdentityRepository(ABC):
     def get_support_grant(self, grant_id: str) -> SupportAccessGrant: ...
 
     @abstractmethod
+    def list_support_grants_for_user(self, support_user_id: str) -> tuple[SupportAccessGrant, ...]:
+        """Grants issued *to* this support user only. Never another user's grants."""
+
+    @abstractmethod
     def save_support_session(self, session: SupportImpersonationSession) -> None: ...
 
     @abstractmethod
@@ -333,6 +337,15 @@ class InMemoryIdentityRepository(IdentityRepository):
             return self.support_grants[grant_id]
         except KeyError as exc:
             raise IdentityNotFound("support grant not found") from exc
+
+    def list_support_grants_for_user(self, support_user_id: str) -> tuple[SupportAccessGrant, ...]:
+        return tuple(
+            sorted(
+                (item for item in self.support_grants.values()
+                 if item.support_user_id == support_user_id),
+                key=lambda item: (item.ends_at, item.grant_id),
+            )
+        )
 
     def save_support_session(self, session: SupportImpersonationSession) -> None:
         with self._lock:

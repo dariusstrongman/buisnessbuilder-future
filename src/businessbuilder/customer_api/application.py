@@ -9,6 +9,18 @@ import re
 from typing import Any, Callable, Mapping
 
 from businessbuilder.build_room.projection import ScopedEnvelope, project_build_room
+from businessbuilder.customer_api.operator_preview import (
+    PERMANENTLY_UNAVAILABLE,
+    PREVIEW_LABEL,
+    PREVIEW_MODE,
+    PREVIEW_NOTICE,
+    active_support_memberships,
+    company_brain_summary,
+    connection_health,
+    grant_view,
+    runtime_activity,
+    session_view,
+)
 from businessbuilder.commercial import Amount, CommercialService
 from businessbuilder.commercial.models import CheckoutStatus, OrderStatus
 from businessbuilder.commercial.models import PaymentEligibility, TaxDisposition, TaxReviewState
@@ -58,6 +70,11 @@ _ORDER_CHECKOUT_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/chec
 _PAID_PILOT_RELEASE_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/paid-pilot-release$")
 _ORDER_OFFER_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/offer$")
 _ORDER_PILOT_ACCESS_ROUTE = re.compile(r"^/api/v1/orders/([A-Za-z0-9_-]{1,128})/pilot-access$")
+_OPERATOR_GRANTS_ROUTE = "/api/v1/operator/support-grants"
+_OPERATOR_COMPANIES_ROUTE = "/api/v1/operator/companies"
+_OPERATOR_PREVIEW_ROUTE = re.compile(
+    r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/dashboard-preview$"
+)
 _OPERATOR_RELEASE_ROUTE = re.compile(
     r"^/api/v1/operator/companies/([A-Za-z0-9_-]{1,128})/orders/([A-Za-z0-9_-]{1,128})/release$"
 )
@@ -426,6 +443,30 @@ class CustomerApi:
         return candidates[0], principal
 
     def _route(self, method, path, query, body, token, user, support, request_id, correlation_id):
+        # Read-only ADMIN PREVIEW surfaces. GET-only by construction: _method raises
+        # 405 for anything else, so no preview route can ever reach a mutation.
+        if path == _OPERATOR_GRANTS_ROUTE:
+            self._method(method, "GET")
+            return ApiResponse(
+                HTTPStatus.OK,
+                self._operator_support_grants(user, request_id, correlation_id),
+            )
+        if path == _OPERATOR_COMPANIES_ROUTE:
+            self._method(method, "GET")
+            return ApiResponse(
+                HTTPStatus.OK,
+                self._operator_companies(token, user, support, query, request_id, correlation_id),
+            )
+        operator_preview = _OPERATOR_PREVIEW_ROUTE.fullmatch(path)
+        if operator_preview:
+            self._method(method, "GET")
+            return ApiResponse(
+                HTTPStatus.OK,
+                self._operator_dashboard_preview(
+                    token, user, support, operator_preview.group(1), request_id, correlation_id
+                ),
+            )
+
         operator_scope = _OPERATOR_SCOPE_ROUTE.fullmatch(path)
         if operator_scope:
             self._method(method, "POST")
@@ -1567,6 +1608,9 @@ class CustomerApi:
         """Return only methods supported by a recognized customer route."""
         if path == "/api/v1/pricing":
             return ("GET",)
+        # Operator preview is read-only: these are the only methods it ever offers.
+        if path in {_OPERATOR_GRANTS_ROUTE, _OPERATOR_COMPANIES_ROUTE} or _OPERATOR_PREVIEW_ROUTE.fullmatch(path):
+            return ("GET",)
         if path == _STRIPE_WEBHOOK_ROUTE:
             return ("POST",)
         if _ORDER_CHECKOUT_ROUTE.fullmatch(path):
@@ -1689,6 +1733,233 @@ class CustomerApi:
         if not isinstance(value, str) or not value or len(value) > maximum or any(c in value for c in "\r\n\0"):
             raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "request field is invalid")
         return value
+
+    # ---- Operator (ADMIN PREVIEW) read-only surfaces -------------------------
+    #
+    # These reuse the existing Identity SUPPORT authority exactly as the founder
+    # surfaces do. They add no bypass, mint no new scope, and mutate nothing.
+
+    def _operator_preview_denied(self, user_id, tenant_id, company_id, reason, request_id, correlation_id):
+        self._audit_denial(
+            user_id, tenant_id or "unresolved", company_id,
+            Permission.VIEW_COMPANY_STATE.value,
+            f"operator preview: {reason}", request_id, correlation_id,
+        )
+        raise ApiFailure(HTTPStatus.FORBIDDEN, "forbidden", "operator preview is not permitted")
+
+    def _audit_operator_preview(self, user_id, tenant_id, company_id, action, reason, metadata, request_id, correlation_id):
+        self.identity_repository.append_audit(
+            IdentityAuditEvent(
+                self.id_factory("identity_audit"),
+                tenant_id,
+                user_id,
+                action,
+                "operator_preview",
+                company_id or tenant_id,
+                self.clock(),
+                reason,
+                "businessbuilder.customer_api.operator_preview",
+                company_id,
+                {"request_id": request_id, "correlation_id": correlation_id, **metadata},
+            )
+        )
+
+    def _operator_support_memberships(self, user_id, request_id, correlation_id):
+        tenants = active_support_memberships(self.identity_repository, user_id)
+        if not tenants:
+            self._operator_preview_denied(
+                user_id, None, None, "no active support membership", request_id, correlation_id
+            )
+        return tenants
+
+    def _operator_preview_scope(self, user_id, support, company_id, request_id, correlation_id):
+        """Resolve and revalidate the caller's own support session and grant."""
+        tenants = self._operator_support_memberships(user_id, request_id, correlation_id)
+        if not support:
+            self._operator_preview_denied(
+                user_id, None, company_id, "an active operator preview session is required",
+                request_id, correlation_id,
+            )
+        now = self.clock()
+        try:
+            session = self.identity_repository.get_support_session(support)
+            grant = self.identity_repository.get_support_grant(session.grant_id)
+        except (LookupError, IdentityError):
+            self._operator_preview_denied(
+                user_id, None, company_id, "support session or grant not found",
+                request_id, correlation_id,
+            )
+        if session.support_user_id != user_id or grant.support_user_id != user_id:
+            self._operator_preview_denied(
+                user_id, None, company_id, "support session belongs to another operator",
+                request_id, correlation_id,
+            )
+        if grant.tenant_id != session.tenant_id or session.tenant_id not in tenants:
+            self._operator_preview_denied(
+                user_id, session.tenant_id, company_id,
+                "support scope is outside this operator's memberships",
+                request_id, correlation_id,
+            )
+        if not session.active_at(now) or not grant.active_at(now):
+            self._operator_preview_denied(
+                user_id, session.tenant_id, company_id, "support grant or session has expired",
+                request_id, correlation_id,
+            )
+        if company_id is not None:
+            # One uniform denial for "outside your grant", "another tenant's company"
+            # and "no such company", so the preview is never an existence oracle.
+            organization = self.identity_repository.get_organization_by_tenant(session.tenant_id)
+            if company_id not in organization.company_ids:
+                self._operator_preview_denied(
+                    user_id, session.tenant_id, company_id,
+                    "company is outside the granted organization",
+                    request_id, correlation_id,
+                )
+            if grant.company_id is not None and grant.company_id != company_id:
+                self._operator_preview_denied(
+                    user_id, session.tenant_id, company_id, "company is outside the support grant",
+                    request_id, correlation_id,
+                )
+            if session.company_id is not None and session.company_id != company_id:
+                self._operator_preview_denied(
+                    user_id, session.tenant_id, company_id, "company is outside the support session",
+                    request_id, correlation_id,
+                )
+        return session, grant, now
+
+    def _operator_support_grants(self, user, request_id, correlation_id):
+        tenants = self._operator_support_memberships(user.user_id, request_id, correlation_id)
+        now = self.clock()
+        grants = [
+            item
+            for item in self.identity_repository.list_support_grants_for_user(user.user_id)
+            if item.tenant_id in tenants and item.active_at(now)
+        ]
+        for tenant_id in tenants:
+            self._audit_operator_preview(
+                user.user_id, tenant_id, None, "operator_preview.grants_listed",
+                "operator listed their own active support grants",
+                {"grants": sum(item.tenant_id == tenant_id for item in grants)},
+                request_id, correlation_id,
+            )
+        return {
+            "mode": PREVIEW_MODE,
+            "label": PREVIEW_LABEL,
+            "read_only": True,
+            "notice": PREVIEW_NOTICE,
+            "support_grants": [grant_view(item, now) for item in grants],
+        }
+
+    def _operator_companies(self, token, user, support, query, request_id, correlation_id):
+        session, grant, now = self._operator_preview_scope(
+            user.user_id, support, None, request_id, correlation_id
+        )
+        term = self._search_term(query)
+        organization = self.identity_repository.get_organization_by_tenant(session.tenant_id)
+        candidates = [
+            company_id for company_id in organization.company_ids
+            if grant.company_id in (None, company_id)
+            and session.company_id in (None, company_id)
+        ]
+        companies = []
+        for company_id in sorted(candidates):
+            try:
+                principal = self._company_principal(
+                    token, user.user_id, company_id, support, Permission.VIEW_COMPANY_STATE,
+                    request_id, correlation_id,
+                )
+                company = self._company(principal)
+                readiness = self._readiness(principal)
+            except (ApiFailure, IdentityError, LookupError):
+                continue
+            if term and term not in company["display_name"].lower() and term not in company_id.lower():
+                continue
+            companies.append({
+                **company,
+                "ready": readiness["ready"],
+                "fully_set": readiness["fully_set"],
+                "readiness_authority": readiness["authority"],
+            })
+        self._audit_operator_preview(
+            user.user_id, session.tenant_id, grant.company_id, "operator_preview.companies_listed",
+            "operator listed companies inside an active support grant",
+            {"grant_id": grant.grant_id, "returned": len(companies), "search": bool(term)},
+            request_id, correlation_id,
+        )
+        return {
+            "mode": PREVIEW_MODE,
+            "label": PREVIEW_LABEL,
+            "read_only": True,
+            "notice": PREVIEW_NOTICE,
+            "grant": grant_view(grant, now),
+            "session": session_view(session, now),
+            "companies": companies,
+        }
+
+    def _operator_dashboard_preview(self, token, user, support, company_id, request_id, correlation_id):
+        session, grant, now = self._operator_preview_scope(
+            user.user_id, support, company_id, request_id, correlation_id
+        )
+        principal = self._company_principal(
+            token, user.user_id, company_id, support, Permission.ACCESS_ARTIFACTS,
+            request_id, correlation_id,
+        )
+        if principal.role is not Role.SUPPORT:
+            self._operator_preview_denied(
+                user.user_id, principal.tenant_id, company_id,
+                "operator preview is never a founder's own dashboard",
+                request_id, correlation_id,
+            )
+        build_room = self._build_room(principal)
+        connections = list(build_room.get("connections") or [])
+        unavailable = list(PERMANENTLY_UNAVAILABLE)
+        if build_room.get("commercial") is None:
+            build_room.pop("commercial", None)
+        self._audit_operator_preview(
+            user.user_id, principal.tenant_id, company_id, "operator_preview.opened",
+            "operator opened a read-only founder dashboard preview",
+            {
+                "grant_id": grant.grant_id,
+                "support_session_id": session.impersonation_session_id,
+                "grant_expires_at": grant.ends_at.isoformat(),
+            },
+            request_id, correlation_id,
+        )
+        return {
+            "operator_preview": {
+                "mode": PREVIEW_MODE,
+                "label": PREVIEW_LABEL,
+                "read_only": True,
+                "impersonation": False,
+                "notice": PREVIEW_NOTICE,
+                "viewer": {"user_id": user.user_id, "role": principal.role.value},
+                "grant": grant_view(grant, now),
+                "session": session_view(session, now),
+                "company": self._company(principal),
+                "company_brain": company_brain_summary(
+                    self.company_brain,
+                    Scope(principal.tenant_id, company_id),
+                    build_room["company"],
+                ),
+                "build_room": build_room,
+                "readiness": self._readiness(principal),
+                "handoff": self._handoff(principal),
+                "connection_health": connection_health(connections),
+                "runtime_activity": runtime_activity(
+                    self.runtime_repository, principal.tenant_id, company_id
+                ),
+                "unavailable": unavailable,
+            }
+        }
+
+    @staticmethod
+    def _search_term(query):
+        values = query.get("q", []) if query else []
+        if not values:
+            return ""
+        if len(values) != 1 or not isinstance(values[0], str) or len(values[0]) > 120:
+            raise ApiFailure(HTTPStatus.BAD_REQUEST, "invalid_request", "search term is invalid")
+        return values[0].strip().lower()
 
     def _accessible_memberships(self, token, user_id, support):
         values = []

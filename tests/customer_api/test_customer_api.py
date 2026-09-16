@@ -71,7 +71,9 @@ from businessbuilder.verification import (
 NOW = datetime(2026, 9, 13, 20, 0, tzinfo=timezone.utc)
 
 
-class CustomerApiTests(unittest.TestCase):
+class CustomerApiFixture(unittest.TestCase):
+    """Composition root shared by every customer-API suite. No tests live here."""
+
     def setUp(self) -> None:
         self.now = NOW
         self.ids = DeterministicIds()
@@ -238,6 +240,8 @@ class CustomerApiTests(unittest.TestCase):
             correlation_id="corr_customer_api_test",
         )
 
+
+class CustomerApiTests(CustomerApiFixture):
     def test_identity_routes_require_active_authentication(self) -> None:
         self.assertEqual(401, self.request("GET", "/api/v1/me").status)
         response = self.request("GET", "/api/v1/me", token=self.owner_token)
